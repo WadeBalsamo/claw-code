@@ -234,6 +234,7 @@ where
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
         let mut iterations = 0;
+        let mut max_turn_input_tokens = 0;
 
         loop {
             iterations += 1;
@@ -250,6 +251,7 @@ where
             let events = self.api_client.stream(request)?;
             let (assistant_message, usage) = build_assistant_message(events)?;
             if let Some(usage) = usage {
+                max_turn_input_tokens = max_turn_input_tokens.max(usage.input_tokens);
                 self.usage_tracker.record(usage);
             }
             let pending_tool_uses = assistant_message
@@ -365,7 +367,7 @@ where
             }
         }
 
-        let auto_compaction = self.maybe_auto_compact();
+        let auto_compaction = self.maybe_auto_compact(max_turn_input_tokens);
 
         Ok(TurnSummary {
             assistant_messages,
@@ -426,17 +428,16 @@ where
         )
     }
 
-    fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
-        if self.usage_tracker.cumulative_usage().input_tokens
-            < self.auto_compaction_input_tokens_threshold
-        {
+    fn maybe_auto_compact(&mut self, turn_input_tokens: u32) -> Option<AutoCompactionEvent> {
+        if turn_input_tokens < self.auto_compaction_input_tokens_threshold {
             return None;
         }
 
         let result = compact_session(
             &self.session,
             CompactionConfig {
-                max_estimated_tokens: 0,
+                max_estimated_tokens: usize::try_from(self.auto_compaction_input_tokens_threshold)
+                    .unwrap_or(usize::MAX),
                 ..CompactionConfig::default()
             },
         );
@@ -1204,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_compacts_when_cumulative_input_threshold_is_crossed() {
+    fn auto_compacts_when_turn_input_threshold_is_crossed() {
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -1227,13 +1228,13 @@ mod tests {
         let session = Session {
             version: 1,
             messages: vec![
-                crate::session::ConversationMessage::user_text("one"),
+                crate::session::ConversationMessage::user_text("one ".repeat(30_000)),
                 crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "two".to_string(),
+                    text: "two ".repeat(30_000),
                 }]),
-                crate::session::ConversationMessage::user_text("three"),
+                crate::session::ConversationMessage::user_text("three ".repeat(30_000)),
                 crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "four".to_string(),
+                    text: "four ".repeat(30_000),
                 }]),
             ],
         };
@@ -1257,6 +1258,72 @@ mod tests {
                 removed_message_count: 2,
             })
         );
+        assert_eq!(runtime.session().messages[0].role, MessageRole::System);
+    }
+
+    #[test]
+    fn auto_compaction_does_not_repeat_after_context_is_already_compacted() {
+        struct SequentialUsageApi {
+            call_count: usize,
+        }
+
+        impl ApiClient for SequentialUsageApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.call_count += 1;
+                let input_tokens = if self.call_count == 1 { 120_000 } else { 64 };
+                Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::Usage(TokenUsage {
+                        input_tokens,
+                        output_tokens: 4,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    }),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let session = Session {
+            version: 1,
+            messages: vec![
+                crate::session::ConversationMessage::user_text("one ".repeat(30_000)),
+                crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "two ".repeat(30_000),
+                }]),
+                crate::session::ConversationMessage::user_text("three ".repeat(30_000)),
+                crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "four ".repeat(30_000),
+                }]),
+            ],
+        };
+
+        let mut runtime = ConversationRuntime::new(
+            session,
+            SequentialUsageApi { call_count: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_auto_compaction_input_tokens_threshold(100_000);
+
+        let first = runtime
+            .run_turn("trigger", None)
+            .expect("first turn should succeed");
+        assert_eq!(
+            first.auto_compaction,
+            Some(AutoCompactionEvent {
+                removed_message_count: 2,
+            })
+        );
+
+        let second = runtime
+            .run_turn("continue", None)
+            .expect("second turn should succeed");
+        assert_eq!(second.auto_compaction, None);
         assert_eq!(runtime.session().messages[0].role, MessageRole::System);
     }
 
