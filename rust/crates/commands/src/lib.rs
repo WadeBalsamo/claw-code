@@ -622,6 +622,7 @@ mod tests {
         .expect("write bundled manifest");
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn parses_supported_slash_commands() {
         assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));

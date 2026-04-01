@@ -2763,10 +2763,7 @@ fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
         "edit_file" | "Edit" => format_edit_result(icon, &parsed),
         "glob_search" | "Glob" => format_glob_result(icon, &parsed),
         "grep_search" | "Grep" => format_grep_result(icon, &parsed),
-        _ => {
-            let summary = truncate_for_summary(output.trim(), 200);
-            format!("{icon} \x1b[38;5;245m{name}:\x1b[0m {summary}")
-        }
+        _ => format_generic_tool_result(icon, name, &parsed),
     }
 }
 
@@ -3031,6 +3028,30 @@ fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
         format!("{summary}\n{filenames}")
     } else {
         summary
+    }
+}
+
+fn format_generic_tool_result(icon: &str, name: &str, parsed: &serde_json::Value) -> String {
+    let rendered_output = match parsed {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            serde_json::to_string_pretty(parsed).unwrap_or_else(|_| parsed.to_string())
+        }
+        _ => parsed.to_string(),
+    };
+    let preview = truncate_output_for_display(
+        &rendered_output,
+        TOOL_OUTPUT_DISPLAY_MAX_LINES,
+        TOOL_OUTPUT_DISPLAY_MAX_CHARS,
+    );
+
+    if preview.is_empty() {
+        format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
+    } else if preview.contains('\n') {
+        format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n{preview}")
+    } else {
+        format!("{icon} \x1b[38;5;245m{name}:\x1b[0m {preview}")
     }
 }
 
@@ -4008,6 +4029,28 @@ mod tests {
         assert!(!rendered.contains("stdout 119"));
         assert!(rendered.contains("full result preserved in session"));
         assert!(output.contains("stdout 119"));
+    }
+
+    #[test]
+    fn tool_rendering_truncates_generic_long_output_for_display_only() {
+        let items = (0..120)
+            .map(|index| format!("payload {index:03}"))
+            .collect::<Vec<_>>();
+        let output = json!({
+            "summary": "plugin payload",
+            "items": items,
+        })
+        .to_string();
+
+        let rendered = format_tool_result("plugin_echo", &output, false);
+
+        assert!(rendered.contains("plugin_echo"));
+        assert!(rendered.contains("payload 000"));
+        assert!(rendered.contains("payload 040"));
+        assert!(!rendered.contains("payload 080"));
+        assert!(!rendered.contains("payload 119"));
+        assert!(rendered.contains("full result preserved in session"));
+        assert!(output.contains("payload 119"));
     }
 
     #[test]
