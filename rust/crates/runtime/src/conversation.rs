@@ -5,7 +5,7 @@ use crate::compact::{
     compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
 };
 use crate::config::RuntimeFeatureConfig;
-use crate::hooks::{HookAbortSignal, HookRunResult, HookRunner};
+use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
 use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
@@ -100,6 +100,7 @@ pub struct ConversationRuntime<C, T> {
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     hook_abort_signal: HookAbortSignal,
+    hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -169,6 +170,77 @@ where
     ) -> Self {
         self.hook_progress_reporter = Some(hook_progress_reporter);
         self
+    }
+
+    fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
+        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
+            self.hook_runner.run_pre_tool_use_with_context(
+                tool_name,
+                input,
+                Some(&self.hook_abort_signal),
+                Some(reporter.as_mut()),
+            )
+        } else {
+            self.hook_runner.run_pre_tool_use_with_context(
+                tool_name,
+                input,
+                Some(&self.hook_abort_signal),
+                None,
+            )
+        }
+    }
+
+    fn run_post_tool_use_hook(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        output: &str,
+        is_error: bool,
+    ) -> HookRunResult {
+        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
+            self.hook_runner.run_post_tool_use_with_context(
+                tool_name,
+                input,
+                output,
+                is_error,
+                Some(&self.hook_abort_signal),
+                Some(reporter.as_mut()),
+            )
+        } else {
+            self.hook_runner.run_post_tool_use_with_context(
+                tool_name,
+                input,
+                output,
+                is_error,
+                Some(&self.hook_abort_signal),
+                None,
+            )
+        }
+    }
+
+    fn run_post_tool_use_failure_hook(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        output: &str,
+    ) -> HookRunResult {
+        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
+            self.hook_runner.run_post_tool_use_failure_with_context(
+                tool_name,
+                input,
+                output,
+                Some(&self.hook_abort_signal),
+                Some(reporter.as_mut()),
+            )
+        } else {
+            self.hook_runner.run_post_tool_use_failure_with_context(
+                tool_name,
+                input,
+                output,
+                Some(&self.hook_abort_signal),
+                None,
+            )
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -312,77 +384,6 @@ where
             iterations,
             usage: self.usage_tracker.cumulative_usage(),
         })
-    }
-
-    fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
-        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
-            self.hook_runner.run_pre_tool_use_with_context(
-                tool_name,
-                input,
-                Some(&self.hook_abort_signal),
-                Some(reporter.as_mut()),
-            )
-        } else {
-            self.hook_runner.run_pre_tool_use_with_context(
-                tool_name,
-                input,
-                Some(&self.hook_abort_signal),
-                None,
-            )
-        }
-    }
-
-    fn run_post_tool_use_hook(
-        &mut self,
-        tool_name: &str,
-        input: &str,
-        output: &str,
-        is_error: bool,
-    ) -> HookRunResult {
-        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
-            self.hook_runner.run_post_tool_use_with_context(
-                tool_name,
-                input,
-                output,
-                is_error,
-                Some(&self.hook_abort_signal),
-                Some(reporter.as_mut()),
-            )
-        } else {
-            self.hook_runner.run_post_tool_use_with_context(
-                tool_name,
-                input,
-                output,
-                is_error,
-                Some(&self.hook_abort_signal),
-                None,
-            )
-        }
-    }
-
-    fn run_post_tool_use_failure_hook(
-        &mut self,
-        tool_name: &str,
-        input: &str,
-        output: &str,
-    ) -> HookRunResult {
-        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
-            self.hook_runner.run_post_tool_use_failure_with_context(
-                tool_name,
-                input,
-                output,
-                Some(&self.hook_abort_signal),
-                Some(reporter.as_mut()),
-            )
-        } else {
-            self.hook_runner.run_post_tool_use_failure_with_context(
-                tool_name,
-                input,
-                output,
-                Some(&self.hook_abort_signal),
-                None,
-            )
-        }
     }
 
     #[must_use]
