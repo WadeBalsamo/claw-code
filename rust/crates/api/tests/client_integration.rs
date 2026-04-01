@@ -53,6 +53,8 @@ async fn send_message_posts_json_and_parses_response() {
     assert_eq!(response.id, "msg_test");
     assert_eq!(response.total_tokens(), 16);
     assert_eq!(response.request_id.as_deref(), Some("req_body_123"));
+    assert_eq!(response.usage.cache_creation_input_tokens, 0);
+    assert_eq!(response.usage.cache_read_input_tokens, 0);
     assert_eq!(
         response.content,
         vec![OutputContentBlock::Text {
@@ -84,6 +86,39 @@ async fn send_message_posts_json_and_parses_response() {
 }
 
 #[tokio::test]
+async fn send_message_parses_prompt_cache_token_usage_from_response() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let body = concat!(
+        "{",
+        "\"id\":\"msg_cache_tokens\",",
+        "\"type\":\"message\",",
+        "\"role\":\"assistant\",",
+        "\"content\":[{\"type\":\"text\",\"text\":\"Cache tokens\"}],",
+        "\"model\":\"claude-3-7-sonnet-latest\",",
+        "\"stop_reason\":\"end_turn\",",
+        "\"stop_sequence\":null,",
+        "\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":321,\"cache_read_input_tokens\":654,\"output_tokens\":4}",
+        "}"
+    );
+    let server = spawn_server(
+        state,
+        vec![http_response("200 OK", "application/json", body)],
+    )
+    .await;
+
+    let client = AnthropicClient::new("test-key").with_base_url(server.base_url());
+    let response = client
+        .send_message(&sample_request(false))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.usage.input_tokens, 12);
+    assert_eq!(response.usage.cache_creation_input_tokens, 321);
+    assert_eq!(response.usage.cache_read_input_tokens, 654);
+    assert_eq!(response.usage.output_tokens, 4);
+}
+
+#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn stream_message_parses_sse_events_with_tool_use() {
     let _guard = env_lock();
@@ -99,7 +134,7 @@ async fn stream_message_parses_sse_events_with_tool_use() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let sse = concat!(
         "event: message_start\n",
-        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":13,\"cache_read_input_tokens\":21,\"output_tokens\":0}}}\n\n",
         "event: content_block_start\n",
         "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_123\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
         "event: content_block_delta\n",
@@ -107,7 +142,7 @@ async fn stream_message_parses_sse_events_with_tool_use() {
         "event: content_block_stop\n",
         "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
         "event: message_delta\n",
-        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":8,\"output_tokens\":1}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":34,\"cache_read_input_tokens\":55,\"output_tokens\":1}}\n\n",
         "event: message_stop\n",
         "data: {\"type\":\"message_stop\"}\n\n",
         "data: [DONE]\n\n"
@@ -185,7 +220,8 @@ async fn stream_message_parses_sse_events_with_tool_use() {
         .prompt_cache_stats()
         .expect("prompt cache stats should exist");
     assert_eq!(cache_stats.tracked_requests, 1);
-    assert_eq!(cache_stats.last_cache_read_input_tokens, Some(0));
+    assert_eq!(cache_stats.last_cache_creation_input_tokens, Some(34));
+    assert_eq!(cache_stats.last_cache_read_input_tokens, Some(55));
     assert_eq!(
         cache_stats.last_cache_source.as_deref(),
         Some("api-response")
