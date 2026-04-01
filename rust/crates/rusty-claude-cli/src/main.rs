@@ -1923,7 +1923,7 @@ fn build_runtime(
 ) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
     let feature_config = build_runtime_feature_config()?;
-    let runtime = ConversationRuntime::new_with_features(
+    let mut runtime = ConversationRuntime::new_with_features(
         session,
         AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
         CliToolExecutor::new(allowed_tools, emit_output),
@@ -1931,7 +1931,43 @@ fn build_runtime(
         system_prompt,
         feature_config,
     );
+    if emit_output {
+        runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
+    }
     Ok(runtime)
+}
+
+struct CliHookProgressReporter;
+
+impl runtime::HookProgressReporter for CliHookProgressReporter {
+    fn on_event(&mut self, event: &runtime::HookProgressEvent) {
+        match event {
+            runtime::HookProgressEvent::Started {
+                event,
+                tool_name,
+                command,
+            } => eprintln!(
+                "[hook {event_name}] {tool_name}: {command}",
+                event_name = event.as_str()
+            ),
+            runtime::HookProgressEvent::Completed {
+                event,
+                tool_name,
+                command,
+            } => eprintln!(
+                "[hook done {event_name}] {tool_name}: {command}",
+                event_name = event.as_str()
+            ),
+            runtime::HookProgressEvent::Cancelled {
+                event,
+                tool_name,
+                command,
+            } => eprintln!(
+                "[hook cancelled {event_name}] {tool_name}: {command}",
+                event_name = event.as_str()
+            ),
+        }
+    }
 }
 
 struct CliPermissionPrompter {
