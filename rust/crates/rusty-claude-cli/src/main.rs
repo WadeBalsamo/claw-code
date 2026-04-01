@@ -450,7 +450,7 @@ fn run_login() -> Result<(), Box<dyn std::error::Error>> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "oauth state mismatch").into());
     }
 
-    let client = AnthropicClient::from_auth(AuthSource::None);
+    let client = AnthropicClient::from_auth(AuthSource::None).with_base_url(api::read_base_url());
     let exchange_request =
         OAuthTokenExchangeRequest::from_config(oauth, code, state, pkce.verifier, redirect_uri);
     let runtime = tokio::runtime::Runtime::new()?;
@@ -1021,7 +1021,7 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let client = AnthropicClient::from_auth(resolve_cli_auth_source()?);
+        let client = AnthropicClient::from_auth(resolve_cli_auth_source()?).with_base_url(api::read_base_url());
         let request = MessageRequest {
             model: self.model.clone(),
             max_tokens: DEFAULT_MAX_TOKENS,
@@ -1922,7 +1922,7 @@ impl AnthropicRuntimeClient {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
-            client: AnthropicClient::from_auth(resolve_cli_auth_source()?),
+            client: AnthropicClient::from_auth(resolve_cli_auth_source()?).with_base_url(api::read_base_url()),
             model,
             enable_tools,
             allowed_tools,
