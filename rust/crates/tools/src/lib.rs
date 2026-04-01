@@ -5,15 +5,15 @@ use std::time::{Duration, Instant};
 
 use api::{
     read_base_url, AnthropicClient, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    MessageRequest, MessageResponse, OutputContentBlock, PromptCache, PromptCacheRecord,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 use reqwest::blocking::Client;
 use runtime::{
     edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file, write_file,
     ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ContentBlock, ConversationMessage,
     ConversationRuntime, GrepSearchInput, MessageRole, PermissionMode, PermissionPolicy,
-    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
+    PromptCacheEvent, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1466,7 +1466,8 @@ fn build_agent_runtime(
         .clone()
         .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
     let allowed_tools = job.allowed_tools.clone();
-    let api_client = AnthropicRuntimeClient::new(model, allowed_tools.clone())?;
+    let api_client =
+        AnthropicRuntimeClient::new(model, allowed_tools.clone(), job.manifest.agent_id.clone())?;
     let tool_executor = SubagentToolExecutor::new(allowed_tools);
     Ok(ConversationRuntime::new(
         Session::new(),
@@ -1643,10 +1644,15 @@ struct AnthropicRuntimeClient {
 }
 
 impl AnthropicRuntimeClient {
-    fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
+    fn new(
+        model: String,
+        allowed_tools: BTreeSet<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Self, String> {
         let client = AnthropicClient::from_env()
             .map_err(|error| error.to_string())?
-            .with_base_url(read_base_url());
+            .with_base_url(read_base_url())
+            .with_prompt_cache(PromptCache::new(session_id));
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             client,
@@ -1657,6 +1663,7 @@ impl AnthropicRuntimeClient {
 }
 
 impl ApiClient for AnthropicRuntimeClient {
+    #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
@@ -1726,8 +1733,8 @@ impl ApiClient for AnthropicRuntimeClient {
                         events.push(AssistantEvent::Usage(TokenUsage {
                             input_tokens: delta.usage.input_tokens,
                             output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
+                            cache_creation_input_tokens: delta.usage.cache_creation_input_tokens,
+                            cache_read_input_tokens: delta.usage.cache_read_input_tokens,
                         }));
                     }
                     ApiStreamEvent::MessageStop(_) => {
@@ -1736,6 +1743,8 @@ impl ApiClient for AnthropicRuntimeClient {
                     }
                 }
             }
+
+            push_prompt_cache_record(&self.client, &mut events);
 
             if !saw_stop
                 && events.iter().any(|event| {
@@ -1761,7 +1770,9 @@ impl ApiClient for AnthropicRuntimeClient {
                 })
                 .await
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
-            Ok(response_to_events(response))
+            let mut events = response_to_events(response);
+            push_prompt_cache_record(&self.client, &mut events);
+            Ok(events)
         })
     }
 }
@@ -1882,6 +1893,26 @@ fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
     }));
     events.push(AssistantEvent::MessageStop);
     events
+}
+
+fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
+    if let Some(event) = client
+        .take_last_prompt_cache_record()
+        .and_then(prompt_cache_record_to_runtime_event)
+    {
+        events.push(AssistantEvent::PromptCache(event));
+    }
+}
+
+fn prompt_cache_record_to_runtime_event(record: PromptCacheRecord) -> Option<PromptCacheEvent> {
+    let cache_break = record.cache_break?;
+    Some(PromptCacheEvent {
+        unexpected: cache_break.unexpected,
+        reason: cache_break.reason,
+        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
+        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
+        token_drop: cache_break.token_drop,
+    })
 }
 
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {

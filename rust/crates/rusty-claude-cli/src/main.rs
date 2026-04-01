@@ -13,8 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use api::{
     resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    PromptCacheRecord, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
+    ToolResultContentBlock,
 };
 
 use commands::{
@@ -28,8 +29,8 @@ use runtime::{
     parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
     AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
     ConversationMessage, ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
-    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
+    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs, ToolSpec};
@@ -995,6 +996,7 @@ impl LiveCli {
         let session = create_managed_session_handle()?;
         let runtime = build_runtime(
             Session::new(),
+            session.id.clone(),
             model.clone(),
             system_prompt.clone(),
             enable_tools,
@@ -1050,13 +1052,14 @@ impl LiveCli {
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
         match result {
-            Ok(_) => {
+            Ok(summary) => {
                 spinner.finish(
                     "✨ Done",
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
                 println!();
+                print_prompt_cache_events(&summary);
                 self.persist_session()?;
                 Ok(())
             }
@@ -1086,6 +1089,7 @@ impl LiveCli {
         let session = self.runtime.session().clone();
         let mut runtime = build_runtime(
             session,
+            self.session.id.clone(),
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1105,6 +1109,7 @@ impl LiveCli {
                 "iterations": summary.iterations,
                 "tool_uses": collect_tool_uses(&summary),
                 "tool_results": collect_tool_results(&summary),
+                "prompt_cache_events": collect_prompt_cache_events(&summary),
                 "usage": {
                     "input_tokens": summary.usage.input_tokens,
                     "output_tokens": summary.usage.output_tokens,
@@ -1232,6 +1237,7 @@ impl LiveCli {
         let message_count = session.messages.len();
         self.runtime = build_runtime(
             session,
+            self.session.id.clone(),
             model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1275,6 +1281,7 @@ impl LiveCli {
         self.permission_mode = permission_mode_from_label(normalized);
         self.runtime = build_runtime(
             session,
+            self.session.id.clone(),
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1300,6 +1307,7 @@ impl LiveCli {
         self.session = create_managed_session_handle()?;
         self.runtime = build_runtime(
             Session::new(),
+            self.session.id.clone(),
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1335,6 +1343,7 @@ impl LiveCli {
         let message_count = session.messages.len();
         self.runtime = build_runtime(
             session,
+            handle.id.clone(),
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1407,6 +1416,7 @@ impl LiveCli {
                 let message_count = session.messages.len();
                 self.runtime = build_runtime(
                     session,
+                    handle.id.clone(),
                     self.model.clone(),
                     self.system_prompt.clone(),
                     true,
@@ -1437,6 +1447,7 @@ impl LiveCli {
         let skipped = removed == 0;
         self.runtime = build_runtime(
             result.compacted_session,
+            self.session.id.clone(),
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1912,8 +1923,10 @@ fn build_runtime_feature_config(
         .clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_runtime(
     session: Session,
+    session_id: String,
     model: String,
     system_prompt: Vec<String>,
     enable_tools: bool,
@@ -1924,11 +1937,17 @@ fn build_runtime(
 {
     Ok(ConversationRuntime::new_with_features(
         session,
-        AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
+        AnthropicRuntimeClient::new(
+            model,
+            enable_tools,
+            emit_output,
+            allowed_tools.clone(),
+            session_id,
+        )?,
         CliToolExecutor::new(allowed_tools, emit_output),
         permission_policy(permission_mode),
         system_prompt,
-        build_runtime_feature_config()?,
+        &build_runtime_feature_config()?,
     ))
 }
 
@@ -1993,11 +2012,13 @@ impl AnthropicRuntimeClient {
         enable_tools: bool,
         emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
+        session_id: impl Into<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url()),
+                .with_base_url(api::read_base_url())
+                .with_prompt_cache(PromptCache::new(session_id)),
             model,
             enable_tools,
             emit_output,
@@ -2112,8 +2133,8 @@ impl ApiClient for AnthropicRuntimeClient {
                         events.push(AssistantEvent::Usage(TokenUsage {
                             input_tokens: delta.usage.input_tokens,
                             output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
+                            cache_creation_input_tokens: delta.usage.cache_creation_input_tokens,
+                            cache_read_input_tokens: delta.usage.cache_read_input_tokens,
                         }));
                     }
                     ApiStreamEvent::MessageStop(_) => {
@@ -2127,6 +2148,8 @@ impl ApiClient for AnthropicRuntimeClient {
                     }
                 }
             }
+
+            push_prompt_cache_record(&self.client, &mut events);
 
             if !saw_stop
                 && events.iter().any(|event| {
@@ -2152,7 +2175,9 @@ impl ApiClient for AnthropicRuntimeClient {
                 })
                 .await
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
-            response_to_events(response, out)
+            let mut events = response_to_events(response, out)?;
+            push_prompt_cache_record(&self.client, &mut events);
+            Ok(events)
         })
     }
 }
@@ -2211,6 +2236,39 @@ fn collect_tool_results(summary: &runtime::TurnSummary) -> Vec<serde_json::Value
             _ => None,
         })
         .collect()
+}
+
+fn collect_prompt_cache_events(summary: &runtime::TurnSummary) -> Vec<serde_json::Value> {
+    summary
+        .prompt_cache_events
+        .iter()
+        .map(|event| {
+            json!({
+                "unexpected": event.unexpected,
+                "reason": event.reason,
+                "previous_cache_read_input_tokens": event.previous_cache_read_input_tokens,
+                "current_cache_read_input_tokens": event.current_cache_read_input_tokens,
+                "token_drop": event.token_drop,
+            })
+        })
+        .collect()
+}
+
+fn print_prompt_cache_events(summary: &runtime::TurnSummary) {
+    for event in &summary.prompt_cache_events {
+        let label = if event.unexpected {
+            "Prompt cache break"
+        } else {
+            "Prompt cache invalidation"
+        };
+        println!(
+            "{label}: {} (cache read {} -> {}, drop {})",
+            event.reason,
+            event.previous_cache_read_input_tokens,
+            event.current_cache_read_input_tokens,
+            event.token_drop,
+        );
+    }
 }
 
 fn slash_command_completion_candidates() -> Vec<String> {
@@ -2359,18 +2417,20 @@ fn first_visible_line(text: &str) -> &str {
 }
 
 fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
     let mut lines = vec![format!("{icon} \x1b[38;5;245mbash\x1b[0m")];
     if let Some(task_id) = parsed
         .get("backgroundTaskId")
         .and_then(|value| value.as_str())
     {
-        lines[0].push_str(&format!(" backgrounded ({task_id})"));
+        let _ = write!(lines[0], " backgrounded ({task_id})");
     } else if let Some(status) = parsed
         .get("returnCodeInterpretation")
         .and_then(|value| value.as_str())
         .filter(|status| !status.is_empty())
     {
-        lines[0].push_str(&format!(" {status}"));
+        let _ = write!(lines[0], " {status}");
     }
 
     if let Some(stdout) = parsed.get("stdout").and_then(|value| value.as_str()) {
@@ -2392,15 +2452,15 @@ fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(file);
     let start_line = file
         .get("startLine")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     let num_lines = file
         .get("numLines")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let total_lines = file
         .get("totalLines")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(num_lines);
     let content = file
         .get("content")
@@ -2426,8 +2486,7 @@ fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
     let line_count = parsed
         .get("content")
         .and_then(|value| value.as_str())
-        .map(|content| content.lines().count())
-        .unwrap_or(0);
+        .map_or(0, |content| content.lines().count());
     format!(
         "{icon} \x1b[1;32m✏️ {} {path}\x1b[0m \x1b[2m({line_count} lines)\x1b[0m",
         if kind == "create" { "Wrote" } else { "Updated" },
@@ -2458,7 +2517,7 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
     let suffix = if parsed
         .get("replaceAll")
-        .and_then(|value| value.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         " (replace all)"
@@ -2486,7 +2545,7 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
 fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
     let num_files = parsed
         .get("numFiles")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let filenames = parsed
         .get("filenames")
@@ -2510,11 +2569,11 @@ fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
 fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
     let num_matches = parsed
         .get("numMatches")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let num_files = parsed
         .get("numFiles")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let content = parsed
         .get("content")
@@ -2619,6 +2678,26 @@ fn response_to_events(
     }));
     events.push(AssistantEvent::MessageStop);
     Ok(events)
+}
+
+fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
+    if let Some(event) = client
+        .take_last_prompt_cache_record()
+        .and_then(prompt_cache_record_to_runtime_event)
+    {
+        events.push(AssistantEvent::PromptCache(event));
+    }
+}
+
+fn prompt_cache_record_to_runtime_event(record: PromptCacheRecord) -> Option<PromptCacheEvent> {
+    let cache_break = record.cache_break?;
+    Some(PromptCacheEvent {
+        unexpected: cache_break.unexpected,
+        reason: cache_break.reason,
+        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
+        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
+        token_drop: cache_break.token_drop,
+    })
 }
 
 struct CliToolExecutor {
