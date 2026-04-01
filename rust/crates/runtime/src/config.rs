@@ -42,6 +42,7 @@ pub struct RuntimeFeatureConfig {
     oauth: Option<OAuthConfig>,
     model: Option<String>,
     permission_mode: Option<ResolvedPermissionMode>,
+    permission_rules: RuntimePermissionRuleConfig,
     sandbox: SandboxConfig,
 }
 
@@ -49,6 +50,14 @@ pub struct RuntimeFeatureConfig {
 pub struct RuntimeHookConfig {
     pre_tool_use: Vec<String>,
     post_tool_use: Vec<String>,
+    post_tool_use_failure: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimePermissionRuleConfig {
+    allow: Vec<String>,
+    deny: Vec<String>,
+    ask: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -235,6 +244,7 @@ impl ConfigLoader {
             oauth: parse_optional_oauth_config(&merged_value, "merged settings.oauth")?,
             model: parse_optional_model(&merged_value),
             permission_mode: parse_optional_permission_mode(&merged_value)?,
+            permission_rules: parse_optional_permission_rules(&merged_value)?,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
         };
 
@@ -345,6 +355,11 @@ impl RuntimeFeatureConfig {
     }
 
     #[must_use]
+    pub fn permission_rules(&self) -> &RuntimePermissionRuleConfig {
+        &self.permission_rules
+    }
+
+    #[must_use]
     pub fn sandbox(&self) -> &SandboxConfig {
         &self.sandbox
     }
@@ -352,10 +367,15 @@ impl RuntimeFeatureConfig {
 
 impl RuntimeHookConfig {
     #[must_use]
-    pub fn new(pre_tool_use: Vec<String>, post_tool_use: Vec<String>) -> Self {
+    pub fn new(
+        pre_tool_use: Vec<String>,
+        post_tool_use: Vec<String>,
+        post_tool_use_failure: Vec<String>,
+    ) -> Self {
         Self {
             pre_tool_use,
             post_tool_use,
+            post_tool_use_failure,
         }
     }
 
@@ -367,6 +387,33 @@ impl RuntimeHookConfig {
     #[must_use]
     pub fn post_tool_use(&self) -> &[String] {
         &self.post_tool_use
+    }
+
+    #[must_use]
+    pub fn post_tool_use_failure(&self) -> &[String] {
+        &self.post_tool_use_failure
+    }
+}
+
+impl RuntimePermissionRuleConfig {
+    #[must_use]
+    pub fn new(allow: Vec<String>, deny: Vec<String>, ask: Vec<String>) -> Self {
+        Self { allow, deny, ask }
+    }
+
+    #[must_use]
+    pub fn allow(&self) -> &[String] {
+        &self.allow
+    }
+
+    #[must_use]
+    pub fn deny(&self) -> &[String] {
+        &self.deny
+    }
+
+    #[must_use]
+    pub fn ask(&self) -> &[String] {
+        &self.ask
     }
 }
 
@@ -480,6 +527,32 @@ fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, Co
         pre_tool_use: optional_string_array(hooks, "PreToolUse", "merged settings.hooks")?
             .unwrap_or_default(),
         post_tool_use: optional_string_array(hooks, "PostToolUse", "merged settings.hooks")?
+            .unwrap_or_default(),
+        post_tool_use_failure: optional_string_array(
+            hooks,
+            "PostToolUseFailure",
+            "merged settings.hooks",
+        )?
+        .unwrap_or_default(),
+    })
+}
+
+fn parse_optional_permission_rules(
+    root: &JsonValue,
+) -> Result<RuntimePermissionRuleConfig, ConfigError> {
+    let Some(object) = root.as_object() else {
+        return Ok(RuntimePermissionRuleConfig::default());
+    };
+    let Some(permissions) = object.get("permissions").and_then(JsonValue::as_object) else {
+        return Ok(RuntimePermissionRuleConfig::default());
+    };
+
+    Ok(RuntimePermissionRuleConfig {
+        allow: optional_string_array(permissions, "allow", "merged settings.permissions")?
+            .unwrap_or_default(),
+        deny: optional_string_array(permissions, "deny", "merged settings.permissions")?
+            .unwrap_or_default(),
+        ask: optional_string_array(permissions, "ask", "merged settings.permissions")?
             .unwrap_or_default(),
     })
 }
