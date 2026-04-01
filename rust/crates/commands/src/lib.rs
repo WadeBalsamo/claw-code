@@ -48,142 +48,179 @@ pub struct SlashCommandSpec {
 const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "help",
+        aliases: &[],
         summary: "Show available slash commands",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "status",
+        aliases: &[],
         summary: "Show current session status",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "compact",
+        aliases: &[],
         summary: "Compact local session history",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "model",
+        aliases: &[],
         summary: "Show or switch the active model",
         argument_hint: Some("[model]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "permissions",
+        aliases: &[],
         summary: "Show or switch the active permission mode",
         argument_hint: Some("[read-only|workspace-write|danger-full-access]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "clear",
+        aliases: &[],
         summary: "Start a fresh local session",
         argument_hint: Some("[--confirm]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "cost",
+        aliases: &[],
         summary: "Show cumulative token usage for this session",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "resume",
+        aliases: &[],
         summary: "Load a saved session into the REPL",
         argument_hint: Some("<session-path>"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "config",
+        aliases: &[],
         summary: "Inspect Claude config files or merged sections",
         argument_hint: Some("[env|hooks|model|plugins]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "memory",
+        aliases: &[],
         summary: "Inspect loaded Claude instruction memory files",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "init",
+        aliases: &[],
         summary: "Create a starter CLAUDE.md for this repo",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "diff",
+        aliases: &[],
         summary: "Show git diff for current workspace changes",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "version",
+        aliases: &[],
         summary: "Show CLI version and build information",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "bughunter",
+        aliases: &[],
         summary: "Inspect the codebase for likely bugs",
         argument_hint: Some("[scope]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "commit",
+        aliases: &[],
         summary: "Generate a commit message and create a git commit",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "pr",
+        aliases: &[],
         summary: "Draft or create a pull request from the conversation",
         argument_hint: Some("[context]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "issue",
+        aliases: &[],
         summary: "Draft or create a GitHub issue from the conversation",
         argument_hint: Some("[context]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "ultraplan",
+        aliases: &[],
         summary: "Run a deep planning prompt with multi-step reasoning",
         argument_hint: Some("[task]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "teleport",
+        aliases: &[],
         summary: "Jump to a file or symbol by searching the workspace",
         argument_hint: Some("<symbol-or-path>"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "debug-tool-call",
+        aliases: &[],
         summary: "Replay the last tool call with debug details",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "export",
+        aliases: &[],
         summary: "Export the current conversation to a file",
         argument_hint: Some("[file]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "session",
+        aliases: &[],
         summary: "List or switch managed local sessions",
         argument_hint: Some("[list|switch <session-id>]"),
         resume_supported: false,
     },
     SlashCommandSpec {
-        name: "plugins",
-        summary: "List or manage plugins",
+        name: "plugin",
+        aliases: &["plugins", "marketplace"],
+        summary: "Manage Claude Code plugins",
         argument_hint: Some(
             "[list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
         ),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "agents",
+        aliases: &[],
+        summary: "Manage agent configurations",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "skills",
+        aliases: &[],
+        summary: "List available skills",
+        argument_hint: None,
         resume_supported: false,
     },
 ];
@@ -629,6 +666,27 @@ mod tests {
         .expect("write bundled manifest");
     }
 
+    fn write_agent(root: &Path, name: &str, description: &str, model: &str, reasoning: &str) {
+        fs::create_dir_all(root).expect("agent root");
+        fs::write(
+            root.join(format!("{name}.toml")),
+            format!(
+                "name = \"{name}\"\ndescription = \"{description}\"\nmodel = \"{model}\"\nmodel_reasoning_effort = \"{reasoning}\"\n"
+            ),
+        )
+        .expect("write agent");
+    }
+
+    fn write_skill(root: &Path, name: &str, description: &str) {
+        let skill_root = root.join(name);
+        fs::create_dir_all(&skill_root).expect("skill root");
+        fs::write(
+            skill_root.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
+        )
+        .expect("write skill");
+    }
+
     #[allow(clippy::too_many_lines)]
     #[test]
     fn parses_supported_slash_commands() {
@@ -961,9 +1019,8 @@ mod tests {
             (DefinitionSource::ProjectCodex, project_agents),
             (DefinitionSource::UserCodex, user_agents),
         ];
-        let report = render_agents_report(
-            &load_agents_from_roots(&roots).expect("agent roots should load"),
-        );
+        let report =
+            render_agents_report(&load_agents_from_roots(&roots).expect("agent roots should load"));
 
         assert!(report.contains("Agents"));
         assert!(report.contains("2 active agents"));
@@ -992,9 +1049,8 @@ mod tests {
             (DefinitionSource::ProjectCodex, project_skills),
             (DefinitionSource::UserCodex, user_skills),
         ];
-        let report = render_skills_report(
-            &load_skills_from_roots(&roots).expect("skill roots should load"),
-        );
+        let report =
+            render_skills_report(&load_skills_from_roots(&roots).expect("skill roots should load"));
 
         assert!(report.contains("Skills"));
         assert!(report.contains("2 available skills"));

@@ -1560,11 +1560,8 @@ impl LiveCli {
             "You are /ultraplan. Produce a deep multi-step execution plan for {task}. Include goals, risks, implementation sequence, verification steps, and rollback considerations. Use tools if needed."
         );
         let mut progress = InternalPromptProgressRun::start_ultraplan(task);
-        match self.run_internal_prompt_text_with_progress(
-            &prompt,
-            true,
-            Some(progress.reporter()),
-        ) {
+        match self.run_internal_prompt_text_with_progress(&prompt, true, Some(progress.reporter()))
+        {
             Ok(plan) => {
                 progress.finish_success();
                 println!("{plan}");
@@ -2466,8 +2463,7 @@ impl InternalPromptProgressReporter {
 
     fn emit(&self, event: InternalPromptProgressEvent, error: Option<&str>) {
         let snapshot = self.snapshot();
-        let line =
-            format_internal_prompt_progress_line(event, &snapshot, self.elapsed(), error);
+        let line = format_internal_prompt_progress_line(event, &snapshot, self.elapsed(), error);
         self.write_line(&line);
     }
 
@@ -2586,12 +2582,10 @@ impl InternalPromptProgressRun {
 
         let (heartbeat_stop, heartbeat_rx) = mpsc::channel();
         let heartbeat_reporter = reporter.clone();
-        let heartbeat_handle = thread::spawn(move || {
-            loop {
-                match heartbeat_rx.recv_timeout(INTERNAL_PROGRESS_HEARTBEAT_INTERVAL) {
-                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                    Err(RecvTimeoutError::Timeout) => heartbeat_reporter.emit_heartbeat(),
-                }
+        let heartbeat_handle = thread::spawn(move || loop {
+            match heartbeat_rx.recv_timeout(INTERNAL_PROGRESS_HEARTBEAT_INTERVAL) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => heartbeat_reporter.emit_heartbeat(),
             }
         });
 
@@ -2608,7 +2602,8 @@ impl InternalPromptProgressRun {
 
     fn finish_success(&mut self) {
         self.stop_heartbeat();
-        self.reporter.emit(InternalPromptProgressEvent::Complete, None);
+        self.reporter
+            .emit(InternalPromptProgressEvent::Complete, None);
     }
 
     fn finish_failure(&mut self, error: &str) {
@@ -2646,13 +2641,20 @@ fn format_internal_prompt_progress_line(
         format!("current step {}", snapshot.step)
     };
     let mut status_bits = vec![step_label, format!("phase {}", snapshot.phase)];
-    if let Some(detail) = snapshot.detail.as_deref().filter(|detail| !detail.is_empty()) {
+    if let Some(detail) = snapshot
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.is_empty())
+    {
         status_bits.push(detail.to_string());
     }
     let status = status_bits.join(" · ");
     match event {
         InternalPromptProgressEvent::Started => {
-            format!("🧭 {} status · planning started · {status}", snapshot.command_label)
+            format!(
+                "🧭 {} status · planning started · {status}",
+                snapshot.command_label
+            )
         }
         InternalPromptProgressEvent::Update => {
             format!("… {} status · {status}", snapshot.command_label)
@@ -2663,8 +2665,7 @@ fn format_internal_prompt_progress_line(
         ),
         InternalPromptProgressEvent::Complete => format!(
             "✔ {} status · completed · {elapsed_seconds}s elapsed · {} steps total",
-            snapshot.command_label,
-            snapshot.step
+            snapshot.command_label, snapshot.step
         ),
         InternalPromptProgressEvent::Failed => format!(
             "✘ {} status · failed · {elapsed_seconds}s elapsed · {}",
@@ -3756,15 +3757,14 @@ fn print_help() {
 mod tests {
     use super::{
         describe_tool_progress, filter_tool_specs, format_compact_report, format_cost_report,
-        format_internal_prompt_progress_line, format_model_report,
-        format_model_switch_report, format_permissions_report,
-        format_permissions_switch_report, format_resume_report, format_status_report,
-        format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
-        parse_git_status_metadata, permission_policy, print_help_to, push_output_block,
-        render_config_report, render_memory_report, render_repl_help, resolve_model_alias,
-        response_to_events, resume_supported_slash_commands, status_context, CliAction,
-        CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState, SlashCommand,
-        StatusUsage, DEFAULT_MODEL,
+        format_internal_prompt_progress_line, format_model_report, format_model_switch_report,
+        format_permissions_report, format_permissions_switch_report, format_resume_report,
+        format_status_report, format_tool_call_start, format_tool_result,
+        normalize_permission_mode, parse_args, parse_git_status_metadata, permission_policy,
+        print_help_to, push_output_block, render_config_report, render_memory_report,
+        render_repl_help, resolve_model_alias, response_to_events, resume_supported_slash_commands,
+        status_context, CliAction, CliOutputFormat, InternalPromptProgressEvent,
+        InternalPromptProgressState, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
@@ -4447,6 +4447,69 @@ mod tests {
         assert!(!rendered.contains("raw 119"));
         assert!(rendered.contains("full result preserved in session"));
         assert!(output.contains("raw 119"));
+    }
+
+    #[test]
+    fn ultraplan_progress_lines_include_phase_step_and_elapsed_status() {
+        let snapshot = InternalPromptProgressState {
+            command_label: "Ultraplan",
+            task_label: "ship plugin progress".to_string(),
+            step: 3,
+            phase: "running read_file".to_string(),
+            detail: Some("reading rust/crates/rusty-claude-cli/src/main.rs".to_string()),
+            saw_final_text: false,
+        };
+
+        let started = format_internal_prompt_progress_line(
+            InternalPromptProgressEvent::Started,
+            &snapshot,
+            Duration::from_secs(0),
+            None,
+        );
+        let heartbeat = format_internal_prompt_progress_line(
+            InternalPromptProgressEvent::Heartbeat,
+            &snapshot,
+            Duration::from_secs(9),
+            None,
+        );
+        let completed = format_internal_prompt_progress_line(
+            InternalPromptProgressEvent::Complete,
+            &snapshot,
+            Duration::from_secs(12),
+            None,
+        );
+        let failed = format_internal_prompt_progress_line(
+            InternalPromptProgressEvent::Failed,
+            &snapshot,
+            Duration::from_secs(12),
+            Some("network timeout"),
+        );
+
+        assert!(started.contains("planning started"));
+        assert!(started.contains("current step 3"));
+        assert!(heartbeat.contains("heartbeat"));
+        assert!(heartbeat.contains("9s elapsed"));
+        assert!(heartbeat.contains("phase running read_file"));
+        assert!(completed.contains("completed"));
+        assert!(completed.contains("3 steps total"));
+        assert!(failed.contains("failed"));
+        assert!(failed.contains("network timeout"));
+    }
+
+    #[test]
+    fn describe_tool_progress_summarizes_known_tools() {
+        assert_eq!(
+            describe_tool_progress("read_file", r#"{"path":"src/main.rs"}"#),
+            "reading src/main.rs"
+        );
+        assert!(
+            describe_tool_progress("bash", r#"{"command":"cargo test -p rusty-claude-cli"}"#)
+                .contains("cargo test -p rusty-claude-cli")
+        );
+        assert_eq!(
+            describe_tool_progress("grep_search", r#"{"pattern":"ultraplan","path":"rust"}"#),
+            "grep `ultraplan` in rust"
+        );
     }
 
     #[test]
