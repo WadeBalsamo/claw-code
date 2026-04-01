@@ -1,3 +1,5 @@
+mod hooks;
+
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
@@ -8,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub use hooks::{HookEvent, HookRunResult, HookRunner};
+
 const EXTERNAL_MARKETPLACE: &str = "external";
 const BUILTIN_MARKETPLACE: &str = "builtin";
 const BUNDLED_MARKETPLACE: &str = "bundled";
@@ -15,7 +19,6 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 const REGISTRY_FILE_NAME: &str = "installed.json";
 const MANIFEST_FILE_NAME: &str = "plugin.json";
 const MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";
-const PACKAGE_MANIFEST_RELATIVE_PATH: &str = MANIFEST_RELATIVE_PATH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,6 +34,17 @@ impl Display for PluginKind {
             Self::Builtin => write!(f, "builtin"),
             Self::Bundled => write!(f, "bundled"),
             Self::External => write!(f, "external"),
+        }
+    }
+}
+
+impl PluginKind {
+    #[must_use]
+    fn marketplace(self) -> &'static str {
+        match self {
+            Self::Builtin => BUILTIN_MARKETPLACE,
+            Self::Bundled => BUNDLED_MARKETPLACE,
+            Self::External => EXTERNAL_MARKETPLACE,
         }
     }
 }
@@ -244,6 +258,8 @@ pub enum PluginInstallSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledPluginRecord {
+    #[serde(default = "default_plugin_kind")]
+    pub kind: PluginKind,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -258,6 +274,10 @@ pub struct InstalledPluginRecord {
 pub struct InstalledPluginRegistry {
     #[serde(default)]
     pub plugins: BTreeMap<String, InstalledPluginRecord>,
+}
+
+fn default_plugin_kind() -> PluginKind {
+    PluginKind::External
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -750,15 +770,24 @@ impl PluginManager {
         Ok(self.plugin_registry()?.summaries())
     }
 
+    pub fn list_installed_plugins(&self) -> Result<Vec<PluginSummary>, PluginError> {
+        Ok(self.installed_plugin_registry()?.summaries())
+    }
+
     pub fn discover_plugins(&self) -> Result<Vec<PluginDefinition>, PluginError> {
+        self.sync_bundled_plugins()?;
         let mut plugins = builtin_plugins();
-        plugins.extend(self.discover_bundled_plugins()?);
-        plugins.extend(self.discover_external_plugins()?);
+        plugins.extend(self.discover_installed_plugins()?);
+        plugins.extend(self.discover_external_directory_plugins(&plugins)?);
         Ok(plugins)
     }
 
     pub fn aggregated_hooks(&self) -> Result<PluginHooks, PluginError> {
         self.plugin_registry()?.aggregated_hooks()
+    }
+
+    pub fn aggregated_tools(&self) -> Result<Vec<PluginTool>, PluginError> {
+        self.plugin_registry()?.aggregated_tools()
     }
 
     pub fn validate_plugin_source(&self, source: &str) -> Result<PluginManifest, PluginError> {
@@ -785,6 +814,7 @@ impl PluginManager {
 
         let now = unix_time_ms();
         let record = InstalledPluginRecord {
+            kind: PluginKind::External,
             id: plugin_id.clone(),
             name: manifest.name,
             version: manifest.version.clone(),
@@ -831,6 +861,12 @@ impl PluginManager {
         let record = registry.plugins.remove(plugin_id).ok_or_else(|| {
             PluginError::NotFound(format!("plugin `{plugin_id}` is not installed"))
         })?;
+        if record.kind == PluginKind::Bundled {
+            registry.plugins.insert(plugin_id.to_string(), record);
+            return Err(PluginError::CommandFailed(format!(
+                "plugin `{plugin_id}` is bundled and managed automatically; disable it instead"
+            )));
+        }
         if record.install_path.exists() {
             fs::remove_dir_all(&record.install_path)?;
         }
@@ -878,40 +914,27 @@ impl PluginManager {
         })
     }
 
-    fn discover_bundled_plugins(&self) -> Result<Vec<PluginDefinition>, PluginError> {
-        discover_plugin_dirs(
-            &self
-                .config
-                .bundled_root
-                .clone()
-                .unwrap_or_else(Self::bundled_root),
-        )?
-        .into_iter()
-        .map(|root| {
-            load_plugin_definition(
-                &root,
-                PluginKind::Bundled,
-                format!("{BUNDLED_MARKETPLACE}:{}", root.display()),
-                BUNDLED_MARKETPLACE,
-            )
-        })
-        .collect()
-    }
-
-    fn discover_external_plugins(&self) -> Result<Vec<PluginDefinition>, PluginError> {
+    fn discover_installed_plugins(&self) -> Result<Vec<PluginDefinition>, PluginError> {
         let registry = self.load_registry()?;
-        let mut plugins = registry
+        registry
             .plugins
             .values()
             .map(|record| {
                 load_plugin_definition(
                     &record.install_path,
-                    PluginKind::External,
+                    record.kind,
                     describe_install_source(&record.source),
-                    EXTERNAL_MARKETPLACE,
+                    record.kind.marketplace(),
                 )
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect()
+    }
+
+    fn discover_external_directory_plugins(
+        &self,
+        existing_plugins: &[PluginDefinition],
+    ) -> Result<Vec<PluginDefinition>, PluginError> {
+        let mut plugins = Vec::new();
 
         for directory in &self.config.external_dirs {
             for root in discover_plugin_dirs(directory)? {
@@ -921,8 +944,9 @@ impl PluginManager {
                     root.display().to_string(),
                     EXTERNAL_MARKETPLACE,
                 )?;
-                if plugins
+                if existing_plugins
                     .iter()
+                    .chain(plugins.iter())
                     .all(|existing| existing.metadata().id != plugin.metadata().id)
                 {
                     plugins.push(plugin);
@@ -931,6 +955,84 @@ impl PluginManager {
         }
 
         Ok(plugins)
+    }
+
+    fn installed_plugin_registry(&self) -> Result<PluginRegistry, PluginError> {
+        self.sync_bundled_plugins()?;
+        Ok(PluginRegistry::new(
+            self.discover_installed_plugins()?
+                .into_iter()
+                .map(|plugin| {
+                    let enabled = self.is_enabled(plugin.metadata());
+                    RegisteredPlugin::new(plugin, enabled)
+                })
+                .collect(),
+        ))
+    }
+
+    fn sync_bundled_plugins(&self) -> Result<(), PluginError> {
+        let bundled_root = self
+            .config
+            .bundled_root
+            .clone()
+            .unwrap_or_else(Self::bundled_root);
+        let bundled_plugins = discover_plugin_dirs(&bundled_root)?;
+        if bundled_plugins.is_empty() {
+            return Ok(());
+        }
+
+        let mut registry = self.load_registry()?;
+        let mut changed = false;
+        let install_root = self.install_root();
+
+        for source_root in bundled_plugins {
+            let manifest = load_validated_package_manifest_from_root(&source_root)?;
+            let plugin_id = plugin_id(&manifest.name, BUNDLED_MARKETPLACE);
+            let install_path = install_root.join(sanitize_plugin_id(&plugin_id));
+            let now = unix_time_ms();
+            let existing_record = registry.plugins.get(&plugin_id);
+            let needs_sync = existing_record.map_or(true, |record| {
+                record.kind != PluginKind::Bundled
+                    || record.version != manifest.version
+                    || record.name != manifest.name
+                    || record.description != manifest.description
+                    || record.install_path != install_path
+                    || !record.install_path.exists()
+            });
+
+            if !needs_sync {
+                continue;
+            }
+
+            if install_path.exists() {
+                fs::remove_dir_all(&install_path)?;
+            }
+            copy_dir_all(&source_root, &install_path)?;
+
+            let installed_at_unix_ms =
+                existing_record.map_or(now, |record| record.installed_at_unix_ms);
+            registry.plugins.insert(
+                plugin_id.clone(),
+                InstalledPluginRecord {
+                    kind: PluginKind::Bundled,
+                    id: plugin_id,
+                    name: manifest.name,
+                    version: manifest.version,
+                    description: manifest.description,
+                    install_path,
+                    source: PluginInstallSource::LocalPath { path: source_root },
+                    installed_at_unix_ms,
+                    updated_at_unix_ms: now,
+                },
+            );
+            changed = true;
+        }
+
+        if changed {
+            self.store_registry(&registry)?;
+        }
+
+        Ok(())
     }
 
     fn is_enabled(&self, metadata: &PluginMetadata) -> bool {
@@ -1089,11 +1191,15 @@ fn validate_plugin_manifest(root: &Path, manifest: &PluginManifest) -> Result<()
     validate_named_strings(&manifest.permissions, "permission")?;
     validate_hook_paths(Some(root), &manifest.hooks)?;
     validate_named_commands(root, &manifest.tools, "tool")?;
+    validate_tool_manifest_entries(&manifest.tools)?;
     validate_named_commands(root, &manifest.commands, "command")?;
     Ok(())
 }
 
-fn validate_package_manifest(root: &Path, manifest: &PluginPackageManifest) -> Result<(), PluginError> {
+fn validate_package_manifest(
+    root: &Path,
+    manifest: &PluginPackageManifest,
+) -> Result<(), PluginError> {
     if manifest.name.trim().is_empty() {
         return Err(PluginError::InvalidManifest(
             "plugin manifest name cannot be empty".to_string(),
@@ -1110,6 +1216,7 @@ fn validate_package_manifest(root: &Path, manifest: &PluginPackageManifest) -> R
         ));
     }
     validate_named_commands(root, &manifest.tools, "tool")?;
+    validate_tool_manifest_entries(&manifest.tools)?;
     Ok(())
 }
 
@@ -1200,6 +1307,27 @@ fn validate_named_commands(
             )));
         }
         validate_command_path(root, entry.command(), kind)?;
+    }
+    Ok(())
+}
+
+fn validate_tool_manifest_entries(entries: &[PluginToolManifest]) -> Result<(), PluginError> {
+    for entry in entries {
+        if !entry.input_schema.is_object() {
+            return Err(PluginError::InvalidManifest(format!(
+                "plugin tool `{}` inputSchema must be a JSON object",
+                entry.name
+            )));
+        }
+        if !matches!(
+            entry.required_permission.as_str(),
+            "read-only" | "workspace-write" | "danger-full-access"
+        ) {
+            return Err(PluginError::InvalidManifest(format!(
+                "plugin tool `{}` requiredPermission must be read-only, workspace-write, or danger-full-access",
+                entry.name
+            )));
+        }
     }
     Ok(())
 }
@@ -1568,75 +1696,225 @@ mod tests {
         std::env::temp_dir().join(format!("plugins-{label}-{}", unix_time_ms()))
     }
 
-    fn write_external_plugin(root: &Path, name: &str, version: &str) {
-        fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
-        fs::create_dir_all(root.join("hooks")).expect("hooks dir");
-        fs::write(
-            root.join("hooks").join("pre.sh"),
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent dir");
+        }
+        fs::write(path, contents).expect("write file");
+    }
+
+    fn write_loader_plugin(root: &Path) {
+        write_file(
+            root.join("hooks").join("pre.sh").as_path(),
             "#!/bin/sh\nprintf 'pre'\n",
-        )
-        .expect("write pre hook");
-        fs::write(
-            root.join("hooks").join("post.sh"),
+        );
+        write_file(
+            root.join("tools").join("echo-tool.sh").as_path(),
+            "#!/bin/sh\ncat\n",
+        );
+        write_file(
+            root.join("commands").join("sync.sh").as_path(),
+            "#!/bin/sh\nprintf 'sync'\n",
+        );
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "loader-demo",
+  "version": "1.2.3",
+  "description": "Manifest loader test plugin",
+  "permissions": ["read", "write"],
+  "hooks": {
+    "PreToolUse": ["./hooks/pre.sh"]
+  },
+  "tools": [
+    {
+      "name": "echo_tool",
+      "description": "Echoes JSON input",
+      "inputSchema": {
+        "type": "object"
+      },
+      "command": "./tools/echo-tool.sh",
+      "requiredPermission": "workspace-write"
+    }
+  ],
+  "commands": [
+    {
+      "name": "sync",
+      "description": "Sync command",
+      "command": "./commands/sync.sh"
+    }
+  ]
+}"#,
+        );
+    }
+
+    fn write_external_plugin(root: &Path, name: &str, version: &str) {
+        write_file(
+            root.join("hooks").join("pre.sh").as_path(),
+            "#!/bin/sh\nprintf 'pre'\n",
+        );
+        write_file(
+            root.join("hooks").join("post.sh").as_path(),
             "#!/bin/sh\nprintf 'post'\n",
-        )
-        .expect("write post hook");
-        fs::write(
-            root.join(MANIFEST_RELATIVE_PATH),
+        );
+        write_file(
+            root.join(MANIFEST_RELATIVE_PATH).as_path(),
             format!(
                 "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"test plugin\",\n  \"hooks\": {{\n    \"PreToolUse\": [\"./hooks/pre.sh\"],\n    \"PostToolUse\": [\"./hooks/post.sh\"]\n  }}\n}}"
-            ),
-        )
-        .expect("write manifest");
+            )
+            .as_str(),
+        );
     }
 
     fn write_broken_plugin(root: &Path, name: &str) {
-        fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
-        fs::write(
-            root.join(MANIFEST_RELATIVE_PATH),
+        write_file(
+            root.join(MANIFEST_RELATIVE_PATH).as_path(),
             format!(
                 "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"description\": \"broken plugin\",\n  \"hooks\": {{\n    \"PreToolUse\": [\"./hooks/missing.sh\"]\n  }}\n}}"
-            ),
-        )
-        .expect("write broken manifest");
+            )
+            .as_str(),
+        );
     }
 
     fn write_lifecycle_plugin(root: &Path, name: &str, version: &str) -> PathBuf {
-        fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
-        fs::create_dir_all(root.join("lifecycle")).expect("lifecycle dir");
         let log_path = root.join("lifecycle.log");
-        fs::write(
-            root.join("lifecycle").join("init.sh"),
+        write_file(
+            root.join("lifecycle").join("init.sh").as_path(),
             "#!/bin/sh\nprintf 'init\\n' >> lifecycle.log\n",
-        )
-        .expect("write init hook");
-        fs::write(
-            root.join("lifecycle").join("shutdown.sh"),
+        );
+        write_file(
+            root.join("lifecycle").join("shutdown.sh").as_path(),
             "#!/bin/sh\nprintf 'shutdown\\n' >> lifecycle.log\n",
-        )
-        .expect("write shutdown hook");
-        fs::write(
-            root.join(MANIFEST_RELATIVE_PATH),
+        );
+        write_file(
+            root.join(MANIFEST_RELATIVE_PATH).as_path(),
             format!(
                 "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"lifecycle plugin\",\n  \"lifecycle\": {{\n    \"Init\": [\"./lifecycle/init.sh\"],\n    \"Shutdown\": [\"./lifecycle/shutdown.sh\"]\n  }}\n}}"
-            ),
-        )
-        .expect("write manifest");
+            )
+            .as_str(),
+        );
         log_path
     }
 
     #[test]
-    fn validates_manifest_shape() {
-        let error = validate_manifest(&PluginManifest {
-            name: String::new(),
-            version: "1.0.0".to_string(),
-            description: "desc".to_string(),
-            default_enabled: false,
-            hooks: PluginHooks::default(),
-            lifecycle: PluginLifecycle::default(),
-        })
-        .expect_err("empty name should fail");
+    fn load_plugin_from_directory_validates_required_fields() {
+        let root = temp_dir("manifest-required");
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{"name":"","version":"1.0.0","description":"desc"}"#,
+        );
+
+        let error = load_plugin_from_directory(&root).expect_err("empty name should fail");
         assert!(error.to_string().contains("name cannot be empty"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_reads_root_manifest_and_validates_entries() {
+        let root = temp_dir("manifest-root");
+        write_loader_plugin(&root);
+
+        let manifest = load_plugin_from_directory(&root).expect("manifest should load");
+        assert_eq!(manifest.name, "loader-demo");
+        assert_eq!(manifest.version, "1.2.3");
+        assert_eq!(manifest.permissions, vec!["read", "write"]);
+        assert_eq!(manifest.hooks.pre_tool_use, vec!["./hooks/pre.sh"]);
+        assert_eq!(manifest.tools.len(), 1);
+        assert_eq!(manifest.tools[0].name, "echo_tool");
+        assert_eq!(manifest.commands.len(), 1);
+        assert_eq!(manifest.commands[0].name, "sync");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_supports_packaged_manifest_path() {
+        let root = temp_dir("manifest-packaged");
+        write_external_plugin(&root, "packaged-demo", "1.0.0");
+
+        let manifest = load_plugin_from_directory(&root).expect("packaged manifest should load");
+        assert_eq!(manifest.name, "packaged-demo");
+        assert!(manifest.tools.is_empty());
+        assert!(manifest.commands.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_defaults_optional_fields() {
+        let root = temp_dir("manifest-defaults");
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "minimal",
+  "version": "0.1.0",
+  "description": "Minimal manifest"
+}"#,
+        );
+
+        let manifest = load_plugin_from_directory(&root).expect("minimal manifest should load");
+        assert!(manifest.permissions.is_empty());
+        assert!(manifest.hooks.is_empty());
+        assert!(manifest.tools.is_empty());
+        assert!(manifest.commands.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_rejects_duplicate_permissions_and_commands() {
+        let root = temp_dir("manifest-duplicates");
+        write_file(
+            root.join("commands").join("sync.sh").as_path(),
+            "#!/bin/sh\nprintf 'sync'\n",
+        );
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "duplicate-manifest",
+  "version": "1.0.0",
+  "description": "Duplicate validation",
+  "permissions": ["read", "read"],
+  "commands": [
+    {"name": "sync", "description": "Sync one", "command": "./commands/sync.sh"},
+    {"name": "sync", "description": "Sync two", "command": "./commands/sync.sh"}
+  ]
+}"#,
+        );
+
+        let error = load_plugin_from_directory(&root).expect_err("duplicates should fail");
+        assert!(error
+            .to_string()
+            .contains("permission `read` is duplicated"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_rejects_missing_tool_or_command_paths() {
+        let root = temp_dir("manifest-paths");
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "missing-paths",
+  "version": "1.0.0",
+  "description": "Missing path validation",
+  "tools": [
+    {
+      "name": "tool_one",
+      "description": "Missing tool script",
+      "inputSchema": {"type": "object"},
+      "command": "./tools/missing.sh"
+    }
+  ]
+}"#,
+        );
+
+        let error = load_plugin_from_directory(&root).expect_err("missing paths should fail");
+        assert!(error.to_string().contains("does not exist"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

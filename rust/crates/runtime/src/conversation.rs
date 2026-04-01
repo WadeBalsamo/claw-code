@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
-use plugins::PluginRegistry;
+use plugins::{HookRunner as PluginHookRunner, PluginRegistry};
 
 use crate::compact::{
     compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
 };
 use crate::config::RuntimeFeatureConfig;
-use crate::hooks::{HookRunResult, HookRunner};
+use crate::hooks::HookRunner;
 use crate::permissions::{PermissionOutcome, PermissionPolicy, PermissionPrompter};
 use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::usage::{TokenUsage, UsageTracker};
@@ -109,6 +109,7 @@ pub struct ConversationRuntime<C, T> {
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     auto_compaction_input_tokens_threshold: u32,
+    plugin_hook_runner: Option<PluginHookRunner>,
     plugin_registry: Option<PluginRegistry>,
     plugins_shutdown: bool,
 }
@@ -172,6 +173,7 @@ where
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(&feature_config),
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
+            plugin_hook_runner: None,
             plugin_registry: None,
             plugins_shutdown: false,
         }
@@ -187,11 +189,8 @@ where
         feature_config: RuntimeFeatureConfig,
         plugin_registry: PluginRegistry,
     ) -> Result<Self, RuntimeError> {
-        let hook_runner =
-            HookRunner::from_feature_config_and_plugins(&feature_config, &plugin_registry)
-                .map_err(|error| {
-                    RuntimeError::new(format!("plugin hook registration failed: {error}"))
-                })?;
+        let plugin_hook_runner = PluginHookRunner::from_registry(&plugin_registry)
+            .map_err(|error| RuntimeError::new(format!("plugin hook registration failed: {error}")))?;
         plugin_registry
             .initialize()
             .map_err(|error| RuntimeError::new(format!("plugin initialization failed: {error}")))?;
@@ -203,7 +202,7 @@ where
             system_prompt,
             feature_config,
         );
-        runtime.hook_runner = hook_runner;
+        runtime.plugin_hook_runner = Some(plugin_hook_runner);
         runtime.plugin_registry = Some(plugin_registry);
         Ok(runtime)
     }
@@ -284,16 +283,36 @@ where
                             ConversationMessage::tool_result(
                                 tool_use_id,
                                 tool_name,
-                                format_hook_message(&pre_hook_result, &deny_message),
+                                format_hook_message(pre_hook_result.messages(), &deny_message),
                                 true,
                             )
                         } else {
+                            let plugin_pre_hook_result =
+                                self.run_plugin_pre_tool_use(&tool_name, &input);
+                            if plugin_pre_hook_result.is_denied() {
+                                let deny_message =
+                                    format!("PreToolUse hook denied tool `{tool_name}`");
+                                ConversationMessage::tool_result(
+                                    tool_use_id,
+                                    tool_name,
+                                    format_hook_message(
+                                        plugin_pre_hook_result.messages(),
+                                        &deny_message,
+                                    ),
+                                    true,
+                                )
+                            } else {
                             let (mut output, mut is_error) =
                                 match self.tool_executor.execute(&tool_name, &input) {
                                     Ok(output) => (output, false),
                                     Err(error) => (error.to_string(), true),
                                 };
                             output = merge_hook_feedback(pre_hook_result.messages(), output, false);
+                            output = merge_hook_feedback(
+                                plugin_pre_hook_result.messages(),
+                                output,
+                                false,
+                            );
 
                             let post_hook_result = self
                                 .hook_runner
@@ -306,6 +325,16 @@ where
                                 output,
                                 post_hook_result.is_denied(),
                             );
+                            let plugin_post_hook_result =
+                                self.run_plugin_post_tool_use(&tool_name, &input, &output, is_error);
+                            if plugin_post_hook_result.is_denied() {
+                                is_error = true;
+                            }
+                            output = merge_hook_feedback(
+                                plugin_post_hook_result.messages(),
+                                output,
+                                plugin_post_hook_result.is_denied(),
+                            );
 
                             ConversationMessage::tool_result(
                                 tool_use_id,
@@ -313,6 +342,7 @@ where
                                 output,
                                 is_error,
                             )
+                            }
                         }
                     }
                     PermissionOutcome::Deny { reason } => {
@@ -363,6 +393,26 @@ where
 
     pub fn shutdown_plugins(&mut self) -> Result<(), RuntimeError> {
         self.shutdown_registered_plugins()
+    }
+
+    fn run_plugin_pre_tool_use(&self, tool_name: &str, input: &str) -> plugins::HookRunResult {
+        self.plugin_hook_runner.as_ref().map_or_else(
+            || plugins::HookRunResult::allow(Vec::new()),
+            |runner| runner.run_pre_tool_use(tool_name, input),
+        )
+    }
+
+    fn run_plugin_post_tool_use(
+        &self,
+        tool_name: &str,
+        input: &str,
+        output: &str,
+        is_error: bool,
+    ) -> plugins::HookRunResult {
+        self.plugin_hook_runner.as_ref().map_or_else(
+            || plugins::HookRunResult::allow(Vec::new()),
+            |runner| runner.run_post_tool_use(tool_name, input, output, is_error),
+        )
     }
 
     fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {

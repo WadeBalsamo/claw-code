@@ -35,7 +35,7 @@ use runtime::{
     Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
-use tools::{execute_tool, mvp_tool_specs, ToolSpec};
+use tools::GlobalToolRegistry;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
@@ -301,51 +301,20 @@ fn resolve_model_alias(model: &str) -> &str {
 }
 
 fn normalize_allowed_tools(values: &[String]) -> Result<Option<AllowedToolSet>, String> {
-    if values.is_empty() {
-        return Ok(None);
-    }
-
-    let canonical_names = mvp_tool_specs()
-        .into_iter()
-        .map(|spec| spec.name.to_string())
-        .collect::<Vec<_>>();
-    let mut name_map = canonical_names
-        .iter()
-        .map(|name| (normalize_tool_name(name), name.clone()))
-        .collect::<BTreeMap<_, _>>();
-
-    for (alias, canonical) in [
-        ("read", "read_file"),
-        ("write", "write_file"),
-        ("edit", "edit_file"),
-        ("glob", "glob_search"),
-        ("grep", "grep_search"),
-    ] {
-        name_map.insert(alias.to_string(), canonical.to_string());
-    }
-
-    let mut allowed = AllowedToolSet::new();
-    for value in values {
-        for token in value
-            .split(|ch: char| ch == ',' || ch.is_whitespace())
-            .filter(|token| !token.is_empty())
-        {
-            let normalized = normalize_tool_name(token);
-            let canonical = name_map.get(&normalized).ok_or_else(|| {
-                format!(
-                    "unsupported tool in --allowedTools: {token} (expected one of: {})",
-                    canonical_names.join(", ")
-                )
-            })?;
-            allowed.insert(canonical.clone());
-        }
-    }
-
-    Ok(Some(allowed))
+    current_tool_registry()
+        .unwrap_or_else(|_| GlobalToolRegistry::builtin())
+        .normalize_allowed_tools(values)
 }
 
-fn normalize_tool_name(value: &str) -> String {
-    value.trim().replace('-', "_").to_ascii_lowercase()
+fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
+    let cwd = env::current_dir().map_err(|error| error.to_string())?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let runtime_config = loader.load().map_err(|error| error.to_string())?;
+    let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+    let plugin_tools = plugin_manager
+        .aggregated_tools()
+        .map_err(|error| error.to_string())?;
+    GlobalToolRegistry::with_plugin_tools(plugin_tools)
 }
 
 fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
@@ -375,11 +344,11 @@ fn default_permission_mode() -> PermissionMode {
         .map_or(PermissionMode::DangerFullAccess, permission_mode_from_label)
 }
 
-fn filter_tool_specs(allowed_tools: Option<&AllowedToolSet>) -> Vec<tools::ToolSpec> {
-    mvp_tool_specs()
-        .into_iter()
-        .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
-        .collect()
+fn filter_tool_specs(
+    tool_registry: &GlobalToolRegistry,
+    allowed_tools: Option<&AllowedToolSet>,
+) -> Vec<ToolDefinition> {
+    tool_registry.definitions(allowed_tools)
 }
 
 fn parse_system_prompt_args(args: &[String]) -> Result<CliAction, String> {
@@ -2347,14 +2316,25 @@ fn build_system_prompt() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     )?)
 }
 
-fn build_runtime_plugin_state(
-) -> Result<(runtime::RuntimeFeatureConfig, PluginRegistry), Box<dyn std::error::Error>> {
+fn build_runtime_plugin_state() -> Result<
+    (
+        runtime::RuntimeFeatureConfig,
+        PluginRegistry,
+        GlobalToolRegistry,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let cwd = env::current_dir()?;
     let loader = ConfigLoader::default_for(&cwd);
     let runtime_config = loader.load()?;
     let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
     let plugin_registry = plugin_manager.plugin_registry()?;
-    Ok((runtime_config.feature_config().clone(), plugin_registry))
+    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?;
+    Ok((
+        runtime_config.feature_config().clone(),
+        plugin_registry,
+        tool_registry,
+    ))
 }
 
 fn build_plugin_manager(
@@ -2404,12 +2384,18 @@ fn build_runtime(
     permission_mode: PermissionMode,
 ) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
-    let (feature_config, plugin_registry) = build_runtime_plugin_state()?;
+    let (feature_config, plugin_registry, tool_registry) = build_runtime_plugin_state()?;
     Ok(ConversationRuntime::new_with_plugins(
         session,
-        AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
-        CliToolExecutor::new(allowed_tools, emit_output),
-        permission_policy(permission_mode),
+        AnthropicRuntimeClient::new(
+            model,
+            enable_tools,
+            emit_output,
+            allowed_tools.clone(),
+            tool_registry.clone(),
+        )?,
+        CliToolExecutor::new(allowed_tools.clone(), emit_output, tool_registry.clone()),
+        permission_policy(permission_mode, &tool_registry),
         system_prompt,
         feature_config,
         plugin_registry,
@@ -2469,6 +2455,7 @@ struct AnthropicRuntimeClient {
     enable_tools: bool,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
+    tool_registry: GlobalToolRegistry,
 }
 
 impl AnthropicRuntimeClient {
@@ -2477,6 +2464,7 @@ impl AnthropicRuntimeClient {
         enable_tools: bool,
         emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
+        tool_registry: GlobalToolRegistry,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
@@ -2486,6 +2474,7 @@ impl AnthropicRuntimeClient {
             enable_tools,
             emit_output,
             allowed_tools,
+            tool_registry,
         })
     }
 }
@@ -2508,16 +2497,9 @@ impl ApiClient for AnthropicRuntimeClient {
             max_tokens: max_tokens_for_model(&self.model),
             messages: convert_messages(&request.messages),
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
-            tools: self.enable_tools.then(|| {
-                filter_tool_specs(self.allowed_tools.as_ref())
-                    .into_iter()
-                    .map(|spec| ToolDefinition {
-                        name: spec.name.to_string(),
-                        description: Some(spec.description.to_string()),
-                        input_schema: spec.input_schema,
-                    })
-                    .collect()
-            }),
+            tools: self
+                .enable_tools
+                .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref())),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
             stream: true,
         };
@@ -3108,14 +3090,20 @@ struct CliToolExecutor {
     renderer: TerminalRenderer,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
+    tool_registry: GlobalToolRegistry,
 }
 
 impl CliToolExecutor {
-    fn new(allowed_tools: Option<AllowedToolSet>, emit_output: bool) -> Self {
+    fn new(
+        allowed_tools: Option<AllowedToolSet>,
+        emit_output: bool,
+        tool_registry: GlobalToolRegistry,
+    ) -> Self {
         Self {
             renderer: TerminalRenderer::new(),
             emit_output,
             allowed_tools,
+            tool_registry,
         }
     }
 }
@@ -3133,7 +3121,7 @@ impl ToolExecutor for CliToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        match execute_tool(tool_name, &value) {
+        match self.tool_registry.execute(tool_name, &value) {
             Ok(output) => {
                 if self.emit_output {
                     let markdown = format_tool_result(tool_name, &output, false);
@@ -3156,16 +3144,13 @@ impl ToolExecutor for CliToolExecutor {
     }
 }
 
-fn permission_policy(mode: PermissionMode) -> PermissionPolicy {
-    tool_permission_specs()
-        .into_iter()
-        .fold(PermissionPolicy::new(mode), |policy, spec| {
-            policy.with_tool_requirement(spec.name, spec.required_permission)
-        })
-}
-
-fn tool_permission_specs() -> Vec<ToolSpec> {
-    mvp_tool_specs()
+fn permission_policy(mode: PermissionMode, tool_registry: &GlobalToolRegistry) -> PermissionPolicy {
+    tool_registry.permission_specs(None).into_iter().fold(
+        PermissionPolicy::new(mode),
+        |policy, (name, required_permission)| {
+            policy.with_tool_requirement(name, required_permission)
+        },
+    )
 }
 
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {

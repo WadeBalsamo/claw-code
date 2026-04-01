@@ -1,4 +1,4 @@
-use plugins::{PluginError, PluginManager, PluginSummary};
+use plugins::{PluginError, PluginKind, PluginManager, PluginSummary};
 use runtime::{compact_session, CompactionConfig, Session};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,7 +370,7 @@ pub fn handle_plugins_slash_command(
 ) -> Result<PluginsCommandResult, PluginError> {
     match action {
         None | Some("list") => Ok(PluginsCommandResult {
-            message: render_plugins_report(&manager.list_plugins()?),
+            message: render_plugins_report(&manager.list_installed_plugins()?),
             reload_runtime: false,
         }),
         Some("install") => {
@@ -382,7 +382,7 @@ pub fn handle_plugins_slash_command(
             };
             let install = manager.install(target)?;
             let plugin = manager
-                .list_plugins()?
+                .list_installed_plugins()?
                 .into_iter()
                 .find(|plugin| plugin.metadata.id == install.plugin_id);
             Ok(PluginsCommandResult {
@@ -393,14 +393,16 @@ pub fn handle_plugins_slash_command(
         Some("enable") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
-                    message: "Usage: /plugins enable <plugin-id>".to_string(),
+                    message: "Usage: /plugins enable <name>".to_string(),
                     reload_runtime: false,
                 });
             };
-            manager.enable(target)?;
+            let plugin = resolve_plugin_target(manager, target)?;
+            manager.enable(&plugin.metadata.id)?;
             Ok(PluginsCommandResult {
                 message: format!(
-                    "Plugins\n  Result           enabled {target}\n  Status           enabled"
+                    "Plugins\n  Result           enabled {}\n  Name             {}\n  Version          {}\n  Status           enabled",
+                    plugin.metadata.id, plugin.metadata.name, plugin.metadata.version
                 ),
                 reload_runtime: true,
             })
@@ -408,14 +410,16 @@ pub fn handle_plugins_slash_command(
         Some("disable") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
-                    message: "Usage: /plugins disable <plugin-id>".to_string(),
+                    message: "Usage: /plugins disable <name>".to_string(),
                     reload_runtime: false,
                 });
             };
-            manager.disable(target)?;
+            let plugin = resolve_plugin_target(manager, target)?;
+            manager.disable(&plugin.metadata.id)?;
             Ok(PluginsCommandResult {
                 message: format!(
-                    "Plugins\n  Result           disabled {target}\n  Status           disabled"
+                    "Plugins\n  Result           disabled {}\n  Name             {}\n  Version          {}\n  Status           disabled",
+                    plugin.metadata.id, plugin.metadata.name, plugin.metadata.version
                 ),
                 reload_runtime: true,
             })
@@ -442,7 +446,7 @@ pub fn handle_plugins_slash_command(
             };
             let update = manager.update(target)?;
             let plugin = manager
-                .list_plugins()?
+                .list_installed_plugins()?
                 .into_iter()
                 .find(|plugin| plugin.metadata.id == update.plugin_id);
             Ok(PluginsCommandResult {
@@ -474,18 +478,23 @@ pub fn handle_plugins_slash_command(
 pub fn render_plugins_report(plugins: &[PluginSummary]) -> String {
     let mut lines = vec!["Plugins".to_string()];
     if plugins.is_empty() {
-        lines.push("  No plugins discovered.".to_string());
+        lines.push("  No plugins installed.".to_string());
         return lines.join("\n");
     }
     for plugin in plugins {
+        let kind = match plugin.metadata.kind {
+            PluginKind::Builtin => "builtin",
+            PluginKind::Bundled => "bundled",
+            PluginKind::External => "external",
+        };
         let enabled = if plugin.enabled {
             "enabled"
         } else {
             "disabled"
         };
         lines.push(format!(
-            "  {name:<20} v{version:<10} {enabled}",
-            name = plugin.metadata.name,
+            "  {id:<24} {kind:<8} {enabled:<8} v{version}",
+            id = plugin.metadata.id,
             version = plugin.metadata.version,
         ));
     }
@@ -500,6 +509,26 @@ fn render_plugin_install_report(plugin_id: &str, plugin: Option<&PluginSummary>)
         "Plugins\n  Result           installed {plugin_id}\n  Name             {name}\n  Version          {version}\n  Status           {}",
         if enabled { "enabled" } else { "disabled" }
     )
+}
+
+fn resolve_plugin_target(
+    manager: &PluginManager,
+    target: &str,
+) -> Result<PluginSummary, PluginError> {
+    let mut matches = manager
+        .list_installed_plugins()?
+        .into_iter()
+        .filter(|plugin| plugin.metadata.id == target || plugin.metadata.name == target)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(PluginError::NotFound(format!(
+            "plugin `{target}` is not installed or discoverable"
+        ))),
+        _ => Err(PluginError::InvalidManifest(format!(
+            "plugin name `{target}` is ambiguous; use the full plugin id"
+        ))),
+    }
 }
 
 #[must_use]
@@ -560,7 +589,7 @@ mod tests {
         render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
         SlashCommand,
     };
-    use plugins::{PluginManager, PluginManagerConfig, PluginMetadata, PluginSummary};
+    use plugins::{PluginKind, PluginManager, PluginManagerConfig, PluginMetadata, PluginSummary};
     use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -583,6 +612,18 @@ mod tests {
             ),
         )
         .expect("write manifest");
+    }
+
+    fn write_bundled_plugin(root: &Path, name: &str, version: &str, default_enabled: bool) {
+        fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
+        fs::write(
+            root.join(".claude-plugin").join("plugin.json"),
+            format!(
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"bundled commands plugin\",\n  \"defaultEnabled\": {}\n}}",
+                if default_enabled { "true" } else { "false" }
+            ),
+        )
+        .expect("write bundled manifest");
     }
 
     #[test]
@@ -839,7 +880,7 @@ mod tests {
                     name: "demo".to_string(),
                     version: "1.2.3".to_string(),
                     description: "demo plugin".to_string(),
-                    kind: plugins::PluginKind::External,
+                    kind: PluginKind::External,
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
@@ -852,7 +893,7 @@ mod tests {
                     name: "sample".to_string(),
                     version: "0.9.0".to_string(),
                     description: "sample plugin".to_string(),
-                    kind: plugins::PluginKind::External,
+                    kind: PluginKind::External,
                     source: "sample".to_string(),
                     default_enabled: false,
                     root: None,
@@ -861,10 +902,10 @@ mod tests {
             },
         ]);
 
-        assert!(rendered.contains("demo"));
+        assert!(rendered.contains("demo@external"));
         assert!(rendered.contains("v1.2.3"));
         assert!(rendered.contains("enabled"));
-        assert!(rendered.contains("sample"));
+        assert!(rendered.contains("sample@external"));
         assert!(rendered.contains("v0.9.0"));
         assert!(rendered.contains("disabled"));
     }
@@ -891,11 +932,75 @@ mod tests {
         let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
             .expect("list command should succeed");
         assert!(!list.reload_runtime);
-        assert!(list.message.contains("demo"));
+        assert!(list.message.contains("demo@external"));
         assert!(list.message.contains("v1.0.0"));
         assert!(list.message.contains("enabled"));
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn enables_and_disables_plugin_by_name() {
+        let config_home = temp_dir("toggle-home");
+        let source_root = temp_dir("toggle-source");
+        write_external_plugin(&source_root, "demo", "1.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        handle_plugins_slash_command(
+            Some("install"),
+            Some(source_root.to_str().expect("utf8 path")),
+            &mut manager,
+        )
+        .expect("install command should succeed");
+
+        let disable = handle_plugins_slash_command(Some("disable"), Some("demo"), &mut manager)
+            .expect("disable command should succeed");
+        assert!(disable.reload_runtime);
+        assert!(disable.message.contains("disabled demo@external"));
+        assert!(disable.message.contains("Name             demo"));
+        assert!(disable.message.contains("Status           disabled"));
+
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+            .expect("list command should succeed");
+        assert!(list.message.contains("demo@external"));
+        assert!(list.message.contains("disabled"));
+
+        let enable = handle_plugins_slash_command(Some("enable"), Some("demo"), &mut manager)
+            .expect("enable command should succeed");
+        assert!(enable.reload_runtime);
+        assert!(enable.message.contains("enabled demo@external"));
+        assert!(enable.message.contains("Name             demo"));
+        assert!(enable.message.contains("Status           enabled"));
+
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+            .expect("list command should succeed");
+        assert!(list.message.contains("demo@external"));
+        assert!(list.message.contains("enabled"));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn lists_auto_installed_bundled_plugins_with_status() {
+        let config_home = temp_dir("bundled-home");
+        let bundled_root = temp_dir("bundled-root");
+        let bundled_plugin = bundled_root.join("starter");
+        write_bundled_plugin(&bundled_plugin, "starter", "0.1.0", false);
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let mut manager = PluginManager::new(config);
+
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+            .expect("list command should succeed");
+        assert!(!list.reload_runtime);
+        assert!(list.message.contains("starter@bundled"));
+        assert!(list.message.contains("bundled"));
+        assert!(list.message.contains("disabled"));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
     }
 }
