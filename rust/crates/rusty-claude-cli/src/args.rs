@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Rust Claude CLI prototype"
 )]
 pub struct Cli {
-    #[arg(long, default_value = "claude-3-7-sonnet")]
+    #[arg(long, default_value = "claude-opus-4-6")]
     pub model: String,
 
     #[arg(long, value_enum, default_value_t = PermissionMode::WorkspaceWrite)]

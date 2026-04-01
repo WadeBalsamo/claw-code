@@ -34,7 +34,7 @@ use runtime::{
 use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs, ToolSpec};
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 32;
 const DEFAULT_DATE: &str = "2026-03-31";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
