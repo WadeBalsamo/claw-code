@@ -38,12 +38,8 @@ const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
-    } else if model.contains("sonnet") {
-        64_000
-    } else if model.contains("haiku") {
-        64_000
     } else {
-        16_384
+        64_000
     }
 }
 const DEFAULT_DATE: &str = "2026-03-31";
@@ -194,6 +190,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             flag if flag.starts_with("--permission-mode=") => {
                 permission_mode = parse_permission_mode_arg(&flag[18..])?;
+                index += 1;
+            }
+            "--dangerously-skip-permissions" => {
+                permission_mode = PermissionMode::DangerFullAccess;
                 index += 1;
             }
             "--allowedTools" | "--allowed-tools" => {
@@ -2348,6 +2348,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "  --permission-mode MODE     Set read-only, workspace-write, or danger-full-access"
     )?;
+    writeln!(out, "  --dangerously-skip-permissions  Skip all permission checks")?;
     writeln!(out, "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)")?;
     writeln!(
         out,
