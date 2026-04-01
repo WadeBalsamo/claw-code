@@ -118,6 +118,48 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: true,
     },
     SlashCommandSpec {
+        name: "bughunter",
+        summary: "Inspect the codebase for likely bugs",
+        argument_hint: Some("[scope]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "commit",
+        summary: "Generate a commit message and create a git commit",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "pr",
+        summary: "Draft or create a pull request from the conversation",
+        argument_hint: Some("[context]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "issue",
+        summary: "Draft or create a GitHub issue from the conversation",
+        argument_hint: Some("[context]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "ultraplan",
+        summary: "Run a deep planning prompt with multi-step reasoning",
+        argument_hint: Some("[task]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "teleport",
+        summary: "Jump to a file or symbol by searching the workspace",
+        argument_hint: Some("<symbol-or-path>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "debug-tool-call",
+        summary: "Replay the last tool call with debug details",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
         name: "export",
         summary: "Export the current conversation to a file",
         argument_hint: Some("[file]"),
@@ -136,6 +178,23 @@ pub enum SlashCommand {
     Help,
     Status,
     Compact,
+    Bughunter {
+        scope: Option<String>,
+    },
+    Commit,
+    Pr {
+        context: Option<String>,
+    },
+    Issue {
+        context: Option<String>,
+    },
+    Ultraplan {
+        task: Option<String>,
+    },
+    Teleport {
+        target: Option<String>,
+    },
+    DebugToolCall,
     Model {
         model: Option<String>,
     },
@@ -180,6 +239,23 @@ impl SlashCommand {
             "help" => Self::Help,
             "status" => Self::Status,
             "compact" => Self::Compact,
+            "bughunter" => Self::Bughunter {
+                scope: remainder_after_command(trimmed, command),
+            },
+            "commit" => Self::Commit,
+            "pr" => Self::Pr {
+                context: remainder_after_command(trimmed, command),
+            },
+            "issue" => Self::Issue {
+                context: remainder_after_command(trimmed, command),
+            },
+            "ultraplan" => Self::Ultraplan {
+                task: remainder_after_command(trimmed, command),
+            },
+            "teleport" => Self::Teleport {
+                target: remainder_after_command(trimmed, command),
+            },
+            "debug-tool-call" => Self::DebugToolCall,
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
@@ -210,6 +286,15 @@ impl SlashCommand {
             other => Self::Unknown(other.to_string()),
         })
     }
+}
+
+fn remainder_after_command(input: &str, command: &str) -> Option<String> {
+    input
+        .trim()
+        .strip_prefix(&format!("/{command}"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[must_use]
@@ -279,6 +364,13 @@ pub fn handle_slash_command(
             session: session.clone(),
         }),
         SlashCommand::Status
+        | SlashCommand::Bughunter { .. }
+        | SlashCommand::Commit
+        | SlashCommand::Pr { .. }
+        | SlashCommand::Issue { .. }
+        | SlashCommand::Ultraplan { .. }
+        | SlashCommand::Teleport { .. }
+        | SlashCommand::DebugToolCall
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Clear { .. }
@@ -307,6 +399,41 @@ mod tests {
     fn parses_supported_slash_commands() {
         assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));
         assert_eq!(SlashCommand::parse(" /status "), Some(SlashCommand::Status));
+        assert_eq!(
+            SlashCommand::parse("/bughunter runtime"),
+            Some(SlashCommand::Bughunter {
+                scope: Some("runtime".to_string())
+            })
+        );
+        assert_eq!(SlashCommand::parse("/commit"), Some(SlashCommand::Commit));
+        assert_eq!(
+            SlashCommand::parse("/pr ready for review"),
+            Some(SlashCommand::Pr {
+                context: Some("ready for review".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/issue flaky test"),
+            Some(SlashCommand::Issue {
+                context: Some("flaky test".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/ultraplan ship both features"),
+            Some(SlashCommand::Ultraplan {
+                task: Some("ship both features".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/teleport conversation.rs"),
+            Some(SlashCommand::Teleport {
+                target: Some("conversation.rs".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/debug-tool-call"),
+            Some(SlashCommand::DebugToolCall)
+        );
         assert_eq!(
             SlashCommand::parse("/model claude-opus"),
             Some(SlashCommand::Model {
@@ -374,6 +501,13 @@ mod tests {
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
         assert!(help.contains("/compact"));
+        assert!(help.contains("/bughunter [scope]"));
+        assert!(help.contains("/commit"));
+        assert!(help.contains("/pr [context]"));
+        assert!(help.contains("/issue [context]"));
+        assert!(help.contains("/ultraplan [task]"));
+        assert!(help.contains("/teleport <symbol-or-path>"));
+        assert!(help.contains("/debug-tool-call"));
         assert!(help.contains("/model [model]"));
         assert!(help.contains("/permissions [read-only|workspace-write|danger-full-access]"));
         assert!(help.contains("/clear [--confirm]"));
@@ -386,7 +520,7 @@ mod tests {
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
-        assert_eq!(slash_command_specs().len(), 15);
+        assert_eq!(slash_command_specs().len(), 22);
         assert_eq!(resume_supported_slash_commands().len(), 11);
     }
 
@@ -434,6 +568,22 @@ mod tests {
         let session = Session::new();
         assert!(handle_slash_command("/unknown", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command("/status", &session, CompactionConfig::default()).is_none());
+        assert!(
+            handle_slash_command("/bughunter", &session, CompactionConfig::default()).is_none()
+        );
+        assert!(handle_slash_command("/commit", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/pr", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/issue", &session, CompactionConfig::default()).is_none());
+        assert!(
+            handle_slash_command("/ultraplan", &session, CompactionConfig::default()).is_none()
+        );
+        assert!(
+            handle_slash_command("/teleport foo", &session, CompactionConfig::default()).is_none()
+        );
+        assert!(
+            handle_slash_command("/debug-tool-call", &session, CompactionConfig::default())
+                .is_none()
+        );
         assert!(
             handle_slash_command("/model claude", &session, CompactionConfig::default()).is_none()
         );

@@ -27,8 +27,8 @@ use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
     parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
     AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
-    ConversationMessage, ConversationRuntime, MessageRole, OAuthAuthorizationRequest,
-    OAuthConfig, OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
+    ConversationMessage, ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
     Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
@@ -775,6 +775,10 @@ fn format_compact_report(removed: usize, resulting_messages: usize, skipped: boo
     }
 }
 
+fn format_auto_compaction_notice(removed: usize) -> String {
+    format!("[auto-compacted: removed {removed} messages]")
+}
+
 fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<String>) {
     let Some(status) = status else {
         return (None, None);
@@ -913,7 +917,14 @@ fn run_resume_command(
                 )),
             })
         }
-        SlashCommand::Resume { .. }
+        SlashCommand::Bughunter { .. }
+        | SlashCommand::Commit
+        | SlashCommand::Pr { .. }
+        | SlashCommand::Issue { .. }
+        | SlashCommand::Ultraplan { .. }
+        | SlashCommand::Teleport { .. }
+        | SlashCommand::DebugToolCall
+        | SlashCommand::Resume { .. }
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
@@ -1050,13 +1061,19 @@ impl LiveCli {
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
         match result {
-            Ok(_) => {
+            Ok(summary) => {
                 spinner.finish(
                     "✨ Done",
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
                 println!();
+                if let Some(event) = summary.auto_compaction {
+                    println!(
+                        "{}",
+                        format_auto_compaction_notice(event.removed_message_count)
+                    );
+                }
                 self.persist_session()?;
                 Ok(())
             }
@@ -1103,6 +1120,10 @@ impl LiveCli {
                 "message": final_assistant_text(&summary),
                 "model": self.model,
                 "iterations": summary.iterations,
+                "auto_compaction": summary.auto_compaction.map(|event| json!({
+                    "removed_messages": event.removed_message_count,
+                    "notice": format_auto_compaction_notice(event.removed_message_count),
+                })),
                 "tool_uses": collect_tool_uses(&summary),
                 "tool_results": collect_tool_results(&summary),
                 "usage": {
@@ -1127,6 +1148,34 @@ impl LiveCli {
             }
             SlashCommand::Status => {
                 self.print_status();
+                false
+            }
+            SlashCommand::Bughunter { scope } => {
+                self.run_bughunter(scope.as_deref())?;
+                false
+            }
+            SlashCommand::Commit => {
+                self.run_commit()?;
+                true
+            }
+            SlashCommand::Pr { context } => {
+                self.run_pr(context.as_deref())?;
+                false
+            }
+            SlashCommand::Issue { context } => {
+                self.run_issue(context.as_deref())?;
+                false
+            }
+            SlashCommand::Ultraplan { task } => {
+                self.run_ultraplan(task.as_deref())?;
+                false
+            }
+            SlashCommand::Teleport { target } => {
+                self.run_teleport(target.as_deref())?;
+                false
+            }
+            SlashCommand::DebugToolCall => {
+                self.run_debug_tool_call()?;
                 false
             }
             SlashCommand::Compact => {
@@ -1446,6 +1495,160 @@ impl LiveCli {
         )?;
         self.persist_session()?;
         println!("{}", format_compact_report(removed, kept, skipped));
+        Ok(())
+    }
+
+    fn run_internal_prompt_text(
+        &self,
+        prompt: &str,
+        enable_tools: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let session = self.runtime.session().clone();
+        let mut runtime = build_runtime(
+            session,
+            self.model.clone(),
+            self.system_prompt.clone(),
+            enable_tools,
+            false,
+            self.allowed_tools.clone(),
+            self.permission_mode,
+        )?;
+        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        let summary = runtime.run_turn(prompt, Some(&mut permission_prompter))?;
+        Ok(final_assistant_text(&summary).trim().to_string())
+    }
+
+    fn run_bughunter(&self, scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let scope = scope.unwrap_or("the current repository");
+        let prompt = format!(
+            "You are /bughunter. Inspect {scope} and identify the most likely bugs or correctness issues. Prioritize concrete findings with file paths, severity, and suggested fixes. Use tools if needed."
+        );
+        println!("{}", self.run_internal_prompt_text(&prompt, true)?);
+        Ok(())
+    }
+
+    fn run_ultraplan(&self, task: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let task = task.unwrap_or("the current repo work");
+        let prompt = format!(
+            "You are /ultraplan. Produce a deep multi-step execution plan for {task}. Include goals, risks, implementation sequence, verification steps, and rollback considerations. Use tools if needed."
+        );
+        println!("{}", self.run_internal_prompt_text(&prompt, true)?);
+        Ok(())
+    }
+
+    fn run_teleport(&self, target: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
+            println!("Usage: /teleport <symbol-or-path>");
+            return Ok(());
+        };
+
+        println!("{}", render_teleport_report(target)?);
+        Ok(())
+    }
+
+    fn run_debug_tool_call(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("{}", render_last_tool_debug_report(self.runtime.session())?);
+        Ok(())
+    }
+
+    fn run_commit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let status = git_output(&["status", "--short"])?;
+        if status.trim().is_empty() {
+            println!("Commit\n  Result           skipped\n  Reason           no workspace changes");
+            return Ok(());
+        }
+
+        git_status_ok(&["add", "-A"])?;
+        let staged_stat = git_output(&["diff", "--cached", "--stat"])?;
+        let prompt = format!(
+            "Generate a git commit message in plain text Lore format only. Base it on this staged diff summary:\n\n{}\n\nRecent conversation context:\n{}",
+            truncate_for_prompt(&staged_stat, 8_000),
+            recent_user_context(self.runtime.session(), 6)
+        );
+        let message = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
+        if message.trim().is_empty() {
+            return Err("generated commit message was empty".into());
+        }
+
+        let path = write_temp_text_file("claw-commit-message.txt", &message)?;
+        let output = Command::new("git")
+            .args(["commit", "--file"])
+            .arg(&path)
+            .current_dir(env::current_dir()?)
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!("git commit failed: {stderr}").into());
+        }
+
+        println!(
+            "Commit\n  Result           created\n  Message file     {}\n\n{}",
+            path.display(),
+            message.trim()
+        );
+        Ok(())
+    }
+
+    fn run_pr(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let staged = git_output(&["diff", "--stat"])?;
+        let prompt = format!(
+            "Generate a pull request title and body from this conversation and diff summary. Output plain text in this format exactly:\nTITLE: <title>\nBODY:\n<body markdown>\n\nContext hint: {}\n\nDiff summary:\n{}",
+            context.unwrap_or("none"),
+            truncate_for_prompt(&staged, 10_000)
+        );
+        let draft = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
+        let (title, body) = parse_titled_body(&draft)
+            .ok_or_else(|| "failed to parse generated PR title/body".to_string())?;
+
+        if command_exists("gh") {
+            let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
+            let output = Command::new("gh")
+                .args(["pr", "create", "--title", &title, "--body-file"])
+                .arg(&body_path)
+                .current_dir(env::current_dir()?)
+                .output()?;
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!(
+                    "PR\n  Result           created\n  Title            {title}\n  URL              {}",
+                    if stdout.is_empty() { "<unknown>" } else { &stdout }
+                );
+                return Ok(());
+            }
+        }
+
+        println!("PR draft\n  Title            {title}\n\n{body}");
+        Ok(())
+    }
+
+    fn run_issue(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let prompt = format!(
+            "Generate a GitHub issue title and body from this conversation. Output plain text in this format exactly:\nTITLE: <title>\nBODY:\n<body markdown>\n\nContext hint: {}\n\nConversation context:\n{}",
+            context.unwrap_or("none"),
+            truncate_for_prompt(&recent_user_context(self.runtime.session(), 10), 10_000)
+        );
+        let draft = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
+        let (title, body) = parse_titled_body(&draft)
+            .ok_or_else(|| "failed to parse generated issue title/body".to_string())?;
+
+        if command_exists("gh") {
+            let body_path = write_temp_text_file("claw-issue-body.md", &body)?;
+            let output = Command::new("gh")
+                .args(["issue", "create", "--title", &title, "--body-file"])
+                .arg(&body_path)
+                .current_dir(env::current_dir()?)
+                .output()?;
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!(
+                    "Issue\n  Result           created\n  Title            {title}\n  URL              {}",
+                    if stdout.is_empty() { "<unknown>" } else { &stdout }
+                );
+                return Ok(());
+            }
+        }
+
+        println!("Issue draft\n  Title            {title}\n\n{body}");
         Ok(())
     }
 }
@@ -1797,6 +2000,206 @@ fn render_diff_report() -> Result<String, Box<dyn std::error::Error>> {
         );
     }
     Ok(format!("Diff\n\n{}", diff.trim_end()))
+}
+
+fn render_teleport_report(target: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+
+    let file_list = Command::new("rg")
+        .args(["--files"])
+        .current_dir(&cwd)
+        .output()?;
+    let file_matches = if file_list.status.success() {
+        String::from_utf8(file_list.stdout)?
+            .lines()
+            .filter(|line| line.contains(target))
+            .take(10)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let content_output = Command::new("rg")
+        .args(["-n", "-S", "--color", "never", target, "."])
+        .current_dir(&cwd)
+        .output()?;
+
+    let mut lines = vec![format!("Teleport\n  Target           {target}")];
+    if !file_matches.is_empty() {
+        lines.push(String::new());
+        lines.push("File matches".to_string());
+        lines.extend(file_matches.into_iter().map(|path| format!("  {path}")));
+    }
+
+    if content_output.status.success() {
+        let matches = String::from_utf8(content_output.stdout)?;
+        if !matches.trim().is_empty() {
+            lines.push(String::new());
+            lines.push("Content matches".to_string());
+            lines.push(truncate_for_prompt(&matches, 4_000));
+        }
+    }
+
+    if lines.len() == 1 {
+        lines.push("  Result           no matches found".to_string());
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn render_last_tool_debug_report(session: &Session) -> Result<String, Box<dyn std::error::Error>> {
+    let last_tool_use = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            message.blocks.iter().rev().find_map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+        })
+        .ok_or_else(|| "no prior tool call found in session".to_string())?;
+
+    let tool_result = session.messages.iter().rev().find_map(|message| {
+        message.blocks.iter().rev().find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                tool_name,
+                output,
+                is_error,
+            } if tool_use_id == &last_tool_use.0 => {
+                Some((tool_name.clone(), output.clone(), *is_error))
+            }
+            _ => None,
+        })
+    });
+
+    let mut lines = vec![
+        "Debug tool call".to_string(),
+        format!("  Tool id          {}", last_tool_use.0),
+        format!("  Tool name        {}", last_tool_use.1),
+        "  Input".to_string(),
+        indent_block(&last_tool_use.2, 4),
+    ];
+
+    match tool_result {
+        Some((tool_name, output, is_error)) => {
+            lines.push("  Result".to_string());
+            lines.push(format!("    name           {tool_name}"));
+            lines.push(format!(
+                "    status         {}",
+                if is_error { "error" } else { "ok" }
+            ));
+            lines.push(indent_block(&output, 4));
+        }
+        None => lines.push("  Result           missing tool result".to_string()),
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn indent_block(value: &str, spaces: usize) -> String {
+    let indent = " ".repeat(spaces);
+    value
+        .lines()
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(env::current_dir()?)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git {} failed: {stderr}", args.join(" ")).into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn git_status_ok(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(env::current_dir()?)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git {} failed: {stderr}", args.join(" ")).into());
+    }
+    Ok(())
+}
+
+fn command_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn write_temp_text_file(
+    filename: &str,
+    contents: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = env::temp_dir().join(filename);
+    fs::write(&path, contents)?;
+    Ok(path)
+}
+
+fn recent_user_context(session: &Session, limit: usize) -> String {
+    let requests = session
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .filter_map(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.trim().to_string()),
+                _ => None,
+            })
+        })
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    if requests.is_empty() {
+        "<no prior user messages>".to_string()
+    } else {
+        requests
+            .into_iter()
+            .rev()
+            .enumerate()
+            .map(|(index, text)| format!("{}. {}", index + 1, text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn truncate_for_prompt(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        value.trim().to_string()
+    } else {
+        let truncated = value.chars().take(limit).collect::<String>();
+        format!("{}\n…[truncated]", truncated.trim_end())
+    }
+}
+
+fn sanitize_generated_message(value: &str) -> String {
+    value.trim().trim_matches('`').trim().replace("\r\n", "\n")
+}
+
+fn parse_titled_body(value: &str) -> Option<(String, String)> {
+    let normalized = sanitize_generated_message(value);
+    let title = normalized
+        .lines()
+        .find_map(|line| line.strip_prefix("TITLE:").map(str::trim))?;
+    let body_start = normalized.find("BODY:")?;
+    let body = normalized[body_start + "BODY:".len()..].trim();
+    Some((title.to_string(), body.to_string()))
 }
 
 fn render_version_report() -> String {
