@@ -149,6 +149,12 @@ impl PluginPermission {
     }
 }
 
+impl AsRef<str> for PluginPermission {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginToolManifest {
     pub name: String,
@@ -224,7 +230,7 @@ struct RawPluginManifest {
     pub commands: Vec<PluginCommandManifest>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawPluginToolManifest {
     pub name: String,
     pub description: String,
@@ -233,7 +239,10 @@ struct RawPluginToolManifest {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(rename = "requiredPermission", default = "default_raw_tool_permission")]
+    #[serde(
+        rename = "requiredPermission",
+        default = "default_tool_permission_label"
+    )]
     pub required_permission: String,
 }
 
@@ -331,7 +340,7 @@ impl PluginTool {
     }
 }
 
-fn default_raw_tool_permission() -> String {
+fn default_tool_permission_label() -> String {
     "danger-full-access".to_string()
 }
 
@@ -773,17 +782,31 @@ pub struct UpdateOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginManifestValidationError {
-    EmptyField { field: &'static str },
+    EmptyField {
+        field: &'static str,
+    },
     EmptyEntryField {
         kind: &'static str,
         field: &'static str,
         name: Option<String>,
     },
-    InvalidPermission { permission: String },
-    DuplicatePermission { permission: String },
-    DuplicateEntry { kind: &'static str, name: String },
-    MissingPath { kind: &'static str, path: PathBuf },
-    InvalidToolInputSchema { tool_name: String },
+    InvalidPermission {
+        permission: String,
+    },
+    DuplicatePermission {
+        permission: String,
+    },
+    DuplicateEntry {
+        kind: &'static str,
+        name: String,
+    },
+    MissingPath {
+        kind: &'static str,
+        path: PathBuf,
+    },
+    InvalidToolInputSchema {
+        tool_name: String,
+    },
     InvalidToolRequiredPermission {
         tool_name: String,
         permission: String,
@@ -1316,89 +1339,34 @@ fn load_plugin_definition(
 }
 
 pub fn load_plugin_from_directory(root: &Path) -> Result<PluginManifest, PluginError> {
-    let manifest = load_manifest_from_directory(root)?;
-    validate_plugin_manifest(root, &manifest)?;
-    Ok(manifest)
+    load_manifest_from_directory(root)
 }
 
 fn load_validated_package_manifest_from_root(
     root: &Path,
 ) -> Result<PluginPackageManifest, PluginError> {
-    let manifest = load_package_manifest_from_root(root)?;
-    validate_package_manifest(root, &manifest)?;
-    validate_hook_paths(Some(root), &manifest.hooks)?;
-    validate_lifecycle_paths(Some(root), &manifest.lifecycle)?;
-    Ok(manifest)
-}
-
-fn validate_plugin_manifest(root: &Path, manifest: &PluginManifest) -> Result<(), PluginError> {
-    if manifest.name.trim().is_empty() {
-        return Err(PluginError::InvalidManifest(
-            "plugin manifest name cannot be empty".to_string(),
-        ));
-    }
-    if manifest.version.trim().is_empty() {
-        return Err(PluginError::InvalidManifest(
-            "plugin manifest version cannot be empty".to_string(),
-        ));
-    }
-    if manifest.description.trim().is_empty() {
-        return Err(PluginError::InvalidManifest(
-            "plugin manifest description cannot be empty".to_string(),
-        ));
-    }
-    validate_named_strings(&manifest.permissions, "permission")?;
-    validate_hook_paths(Some(root), &manifest.hooks)?;
-    validate_named_commands(root, &manifest.tools, "tool")?;
-    validate_tool_manifest_entries(&manifest.tools)?;
-    validate_named_commands(root, &manifest.commands, "command")?;
-    Ok(())
-}
-
-fn validate_package_manifest(
-    root: &Path,
-    manifest: &PluginPackageManifest,
-) -> Result<(), PluginError> {
-    if manifest.name.trim().is_empty() {
-        return Err(PluginError::InvalidManifest(
-            "plugin manifest name cannot be empty".to_string(),
-        ));
-    }
-    if manifest.version.trim().is_empty() {
-        return Err(PluginError::InvalidManifest(
-            "plugin manifest version cannot be empty".to_string(),
-        ));
-    }
-    if manifest.description.trim().is_empty() {
-        return Err(PluginError::InvalidManifest(
-            "plugin manifest description cannot be empty".to_string(),
-        ));
-    }
-    validate_named_commands(root, &manifest.tools, "tool")?;
-    validate_tool_manifest_entries(&manifest.tools)?;
-    Ok(())
+    load_package_manifest_from_root(root)
 }
 
 fn load_manifest_from_directory(root: &Path) -> Result<PluginManifest, PluginError> {
     let manifest_path = plugin_manifest_path(root)?;
-    let contents = fs::read_to_string(&manifest_path).map_err(|error| {
-        PluginError::NotFound(format!(
-            "plugin manifest not found at {}: {error}",
-            manifest_path.display()
-        ))
-    })?;
-    Ok(serde_json::from_str(&contents)?)
+    load_manifest_from_path(root, &manifest_path)
 }
 
 fn load_package_manifest_from_root(root: &Path) -> Result<PluginPackageManifest, PluginError> {
     let manifest_path = root.join(MANIFEST_RELATIVE_PATH);
+    load_manifest_from_path(root, &manifest_path)
+}
+
+fn load_manifest_from_path(root: &Path, manifest_path: &Path) -> Result<PluginManifest, PluginError> {
     let contents = fs::read_to_string(&manifest_path).map_err(|error| {
         PluginError::NotFound(format!(
             "plugin manifest not found at {}: {error}",
             manifest_path.display()
         ))
     })?;
-    Ok(serde_json::from_str(&contents)?)
+    let raw_manifest: RawPluginManifest = serde_json::from_str(&contents)?;
+    build_plugin_manifest(root, raw_manifest)
 }
 
 fn plugin_manifest_path(root: &Path) -> Result<PathBuf, PluginError> {
@@ -1419,76 +1387,238 @@ fn plugin_manifest_path(root: &Path) -> Result<PathBuf, PluginError> {
     )))
 }
 
-fn validate_named_strings(entries: &[String], kind: &str) -> Result<(), PluginError> {
-    let mut seen = BTreeSet::<&str>::new();
-    for entry in entries {
-        let trimmed = entry.trim();
-        if trimmed.is_empty() {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin manifest {kind} cannot be empty"
-            )));
-        }
-        if !seen.insert(trimmed) {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin manifest {kind} `{trimmed}` is duplicated"
-            )));
-        }
+fn build_plugin_manifest(root: &Path, raw: RawPluginManifest) -> Result<PluginManifest, PluginError> {
+    let mut errors = Vec::new();
+
+    validate_required_manifest_field("name", &raw.name, &mut errors);
+    validate_required_manifest_field("version", &raw.version, &mut errors);
+    validate_required_manifest_field("description", &raw.description, &mut errors);
+
+    let permissions = build_manifest_permissions(&raw.permissions, &mut errors);
+    validate_command_entries(root, raw.hooks.pre_tool_use.iter(), "hook", &mut errors);
+    validate_command_entries(root, raw.hooks.post_tool_use.iter(), "hook", &mut errors);
+    validate_command_entries(root, raw.lifecycle.init.iter(), "lifecycle command", &mut errors);
+    validate_command_entries(
+        root,
+        raw.lifecycle.shutdown.iter(),
+        "lifecycle command",
+        &mut errors,
+    );
+    let tools = build_manifest_tools(root, raw.tools, &mut errors);
+    let commands = build_manifest_commands(root, raw.commands, &mut errors);
+
+    if !errors.is_empty() {
+        return Err(PluginError::ManifestValidation(errors));
     }
-    Ok(())
+
+    Ok(PluginManifest {
+        name: raw.name,
+        version: raw.version,
+        description: raw.description,
+        permissions,
+        default_enabled: raw.default_enabled,
+        hooks: raw.hooks,
+        lifecycle: raw.lifecycle,
+        tools,
+        commands,
+    })
 }
 
-fn validate_named_commands(
+fn validate_required_manifest_field(
+    field: &'static str,
+    value: &str,
+    errors: &mut Vec<PluginManifestValidationError>,
+) {
+    if value.trim().is_empty() {
+        errors.push(PluginManifestValidationError::EmptyField { field });
+    }
+}
+
+fn build_manifest_permissions(
+    permissions: &[String],
+    errors: &mut Vec<PluginManifestValidationError>,
+) -> Vec<PluginPermission> {
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::new();
+
+    for permission in permissions {
+        let permission = permission.trim();
+        if permission.is_empty() {
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "permission",
+                field: "value",
+                name: None,
+            });
+            continue;
+        }
+        if !seen.insert(permission.to_string()) {
+            errors.push(PluginManifestValidationError::DuplicatePermission {
+                permission: permission.to_string(),
+            });
+            continue;
+        }
+        match PluginPermission::parse(permission) {
+            Some(permission) => validated.push(permission),
+            None => errors.push(PluginManifestValidationError::InvalidPermission {
+                permission: permission.to_string(),
+            }),
+        }
+    }
+
+    validated
+}
+
+fn build_manifest_tools(
     root: &Path,
-    entries: &[impl NamedCommand],
-    kind: &str,
-) -> Result<(), PluginError> {
-    let mut seen = BTreeSet::<&str>::new();
-    for entry in entries {
-        let name = entry.name().trim();
+    tools: Vec<RawPluginToolManifest>,
+    errors: &mut Vec<PluginManifestValidationError>,
+) -> Vec<PluginToolManifest> {
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::new();
+
+    for tool in tools {
+        let name = tool.name.trim().to_string();
         if name.is_empty() {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin {kind} name cannot be empty"
-            )));
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "tool",
+                field: "name",
+                name: None,
+            });
+            continue;
         }
-        if !seen.insert(name) {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin {kind} `{name}` is duplicated"
-            )));
+        if !seen.insert(name.clone()) {
+            errors.push(PluginManifestValidationError::DuplicateEntry {
+                kind: "tool",
+                name,
+            });
+            continue;
         }
-        if entry.description().trim().is_empty() {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin {kind} `{name}` description cannot be empty"
-            )));
+        if tool.description.trim().is_empty() {
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "tool",
+                field: "description",
+                name: Some(name.clone()),
+            });
         }
-        if entry.command().trim().is_empty() {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin {kind} `{name}` command cannot be empty"
-            )));
+        if tool.command.trim().is_empty() {
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "tool",
+                field: "command",
+                name: Some(name.clone()),
+            });
+        } else {
+            validate_command_entry(root, &tool.command, "tool", errors);
         }
-        validate_command_path(root, entry.command(), kind)?;
+        if !tool.input_schema.is_object() {
+            errors.push(PluginManifestValidationError::InvalidToolInputSchema {
+                tool_name: name.clone(),
+            });
+        }
+        let Some(required_permission) = PluginToolPermission::parse(tool.required_permission.trim()) else {
+            errors.push(PluginManifestValidationError::InvalidToolRequiredPermission {
+                tool_name: name.clone(),
+                permission: tool.required_permission.trim().to_string(),
+            });
+            continue;
+        };
+
+        validated.push(PluginToolManifest {
+            name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+            command: tool.command,
+            args: tool.args,
+            required_permission,
+        });
     }
-    Ok(())
+
+    validated
 }
 
-fn validate_tool_manifest_entries(entries: &[PluginToolManifest]) -> Result<(), PluginError> {
-    for entry in entries {
-        if !entry.input_schema.is_object() {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin tool `{}` inputSchema must be a JSON object",
-                entry.name
-            )));
+fn build_manifest_commands(
+    root: &Path,
+    commands: Vec<PluginCommandManifest>,
+    errors: &mut Vec<PluginManifestValidationError>,
+) -> Vec<PluginCommandManifest> {
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::new();
+
+    for command in commands {
+        let name = command.name.trim().to_string();
+        if name.is_empty() {
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "command",
+                field: "name",
+                name: None,
+            });
+            continue;
         }
-        if !matches!(
-            entry.required_permission.as_str(),
-            "read-only" | "workspace-write" | "danger-full-access"
-        ) {
-            return Err(PluginError::InvalidManifest(format!(
-                "plugin tool `{}` requiredPermission must be read-only, workspace-write, or danger-full-access",
-                entry.name
-            )));
+        if !seen.insert(name.clone()) {
+            errors.push(PluginManifestValidationError::DuplicateEntry {
+                kind: "command",
+                name,
+            });
+            continue;
         }
+        if command.description.trim().is_empty() {
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "command",
+                field: "description",
+                name: Some(name.clone()),
+            });
+        }
+        if command.command.trim().is_empty() {
+            errors.push(PluginManifestValidationError::EmptyEntryField {
+                kind: "command",
+                field: "command",
+                name: Some(name.clone()),
+            });
+        } else {
+            validate_command_entry(root, &command.command, "command", errors);
+        }
+        validated.push(command);
     }
-    Ok(())
+
+    validated
+}
+
+fn validate_command_entries<'a>(
+    root: &Path,
+    entries: impl Iterator<Item = &'a String>,
+    kind: &'static str,
+    errors: &mut Vec<PluginManifestValidationError>,
+) {
+    for entry in entries {
+        validate_command_entry(root, entry, kind, errors);
+    }
+}
+
+fn validate_command_entry(
+    root: &Path,
+    entry: &str,
+    kind: &'static str,
+    errors: &mut Vec<PluginManifestValidationError>,
+) {
+    if entry.trim().is_empty() {
+        errors.push(PluginManifestValidationError::EmptyEntryField {
+            kind,
+            field: "command",
+            name: None,
+        });
+        return;
+    }
+    if is_literal_command(entry) {
+        return;
+    }
+
+    let path = if Path::new(entry).is_absolute() {
+        PathBuf::from(entry)
+    } else {
+        root.join(entry)
+    };
+    if !path.exists() {
+        errors.push(PluginManifestValidationError::MissingPath { kind, path });
+    }
 }
 
 trait NamedCommand {
@@ -1574,7 +1704,7 @@ fn resolve_tools(
                 },
                 resolve_hook_entry(root, &tool.command),
                 tool.args.clone(),
-                tool.required_permission.clone(),
+                tool.required_permission,
                 Some(root.to_path_buf()),
             )
         })
@@ -2030,7 +2160,14 @@ mod tests {
         let manifest = load_plugin_from_directory(&root).expect("manifest should load");
         assert_eq!(manifest.name, "loader-demo");
         assert_eq!(manifest.version, "1.2.3");
-        assert_eq!(manifest.permissions, vec!["read", "write"]);
+        assert_eq!(
+            manifest
+                .permissions
+                .iter()
+                .map(|permission| permission.as_str())
+                .collect::<Vec<_>>(),
+            vec!["read", "write"]
+        );
         assert_eq!(manifest.hooks.pre_tool_use, vec!["./hooks/pre.sh"]);
         assert_eq!(manifest.tools.len(), 1);
         assert_eq!(manifest.tools[0].name, "echo_tool");
