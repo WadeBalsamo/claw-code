@@ -2215,7 +2215,7 @@ fn execute_shell_command(
             persisted_output_path: None,
             persisted_output_size: None,
             sandbox_status: None,
-});
+        });
     }
 
     let mut process = std::process::Command::new(shell);
@@ -2284,7 +2284,7 @@ Command exceeded timeout of {timeout_ms} ms",
                     persisted_output_path: None,
                     persisted_output_size: None,
                     sandbox_status: None,
-});
+                });
             }
             std::thread::sleep(Duration::from_millis(10));
         }
