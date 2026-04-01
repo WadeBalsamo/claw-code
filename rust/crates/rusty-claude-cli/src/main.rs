@@ -35,7 +35,17 @@ use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs, ToolSpec};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
-const DEFAULT_MAX_TOKENS: u32 = 32;
+fn max_tokens_for_model(model: &str) -> u32 {
+    if model.contains("opus") {
+        32_000
+    } else if model.contains("sonnet") {
+        64_000
+    } else if model.contains("haiku") {
+        64_000
+    } else {
+        16_384
+    }
+}
 const DEFAULT_DATE: &str = "2026-03-31";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1046,7 +1056,7 @@ impl LiveCli {
             .with_base_url(api::read_base_url());
         let request = MessageRequest {
             model: self.model.clone(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: max_tokens_for_model(&self.model),
             messages: vec![InputMessage {
                 role: "user".to_string(),
                 content: vec![InputContentBlock::Text {
@@ -1970,7 +1980,7 @@ impl ApiClient for AnthropicRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let message_request = MessageRequest {
             model: self.model.clone(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: max_tokens_for_model(&self.model),
             messages: convert_messages(&request.messages),
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
             tools: self.enable_tools.then(|| {
