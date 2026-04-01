@@ -278,6 +278,12 @@ pub enum SlashCommand {
         action: Option<String>,
         target: Option<String>,
     },
+    Agents {
+        args: Option<String>,
+    },
+    Skills {
+        args: Option<String>,
+    },
     Unknown(String),
 }
 
@@ -339,12 +345,18 @@ impl SlashCommand {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
             },
-            "plugins" => Self::Plugins {
+            "plugin" | "plugins" | "marketplace" => Self::Plugins {
                 action: parts.next().map(ToOwned::to_owned),
                 target: {
                     let remainder = parts.collect::<Vec<_>>().join(" ");
                     (!remainder.is_empty()).then_some(remainder)
                 },
+            },
+            "agents" => Self::Agents {
+                args: remainder_after_command(trimmed, command),
+            },
+            "skills" => Self::Skills {
+                args: remainder_after_command(trimmed, command),
             },
             other => Self::Unknown(other.to_string()),
         })
@@ -384,12 +396,27 @@ pub fn render_slash_command_help() -> String {
             Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
             None => format!("/{}", spec.name),
         };
+        let alias_suffix = if spec.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (aliases: {})",
+                spec.aliases
+                    .iter()
+                    .map(|alias| format!("/{alias}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let resume = if spec.resume_supported {
             " [resume]"
         } else {
             ""
         };
-        lines.push(format!("  {name:<20} {}{}", spec.summary, resume));
+        lines.push(format!(
+            "  {name:<20} {}{alias_suffix}{resume}",
+            spec.summary
+        ));
     }
     lines.join("\n")
 }
@@ -404,6 +431,45 @@ pub struct SlashCommandResult {
 pub struct PluginsCommandResult {
     pub message: String,
     pub reload_runtime: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DefinitionSource {
+    ProjectCodex,
+    ProjectClaude,
+    UserCodexHome,
+    UserCodex,
+    UserClaude,
+}
+
+impl DefinitionSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProjectCodex => "Project (.codex)",
+            Self::ProjectClaude => "Project (.claude)",
+            Self::UserCodexHome => "User ($CODEX_HOME)",
+            Self::UserCodex => "User (~/.codex)",
+            Self::UserClaude => "User (~/.claude)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentSummary {
+    name: String,
+    description: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    source: DefinitionSource,
+    shadowed_by: Option<DefinitionSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillSummary {
+    name: String,
+    description: Option<String>,
+    source: DefinitionSource,
+    shadowed_by: Option<DefinitionSource>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -518,6 +584,26 @@ pub fn handle_plugins_slash_command(
     }
 }
 
+pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
+    if let Some(args) = args.filter(|value| !value.trim().is_empty()) {
+        return Ok(format!("Usage: /agents\nUnexpected arguments: {args}"));
+    }
+
+    let roots = discover_definition_roots(cwd, "agents");
+    let agents = load_agents_from_roots(&roots)?;
+    Ok(render_agents_report(&agents))
+}
+
+pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
+    if let Some(args) = args.filter(|value| !value.trim().is_empty()) {
+        return Ok(format!("Usage: /skills\nUnexpected arguments: {args}"));
+    }
+
+    let roots = discover_definition_roots(cwd, "skills");
+    let skills = load_skills_from_roots(&roots)?;
+    Ok(render_skills_report(&skills))
+}
+
 #[must_use]
 pub fn render_plugins_report(plugins: &[PluginSummary]) -> String {
     let mut lines = vec!["Plugins".to_string()];
@@ -570,6 +656,303 @@ fn resolve_plugin_target(
     }
 }
 
+fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, PathBuf)> {
+    let mut roots = Vec::new();
+
+    for ancestor in cwd.ancestors() {
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::ProjectCodex,
+            ancestor.join(".codex").join(leaf),
+        );
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join(leaf),
+        );
+    }
+
+    if let Ok(codex_home) = env::var("CODEX_HOME") {
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::UserCodexHome,
+            PathBuf::from(codex_home).join(leaf),
+        );
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::UserCodex,
+            home.join(".codex").join(leaf),
+        );
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::UserClaude,
+            home.join(".claude").join(leaf),
+        );
+    }
+
+    roots
+}
+
+fn push_unique_root(
+    roots: &mut Vec<(DefinitionSource, PathBuf)>,
+    source: DefinitionSource,
+    path: PathBuf,
+) {
+    if path.is_dir() && !roots.iter().any(|(_, existing)| existing == &path) {
+        roots.push((source, path));
+    }
+}
+
+fn load_agents_from_roots(
+    roots: &[(DefinitionSource, PathBuf)],
+) -> std::io::Result<Vec<AgentSummary>> {
+    let mut agents = Vec::new();
+    let mut active_sources = BTreeMap::<String, DefinitionSource>::new();
+
+    for (source, root) in roots {
+        let mut root_agents = Vec::new();
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.path().extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            let contents = fs::read_to_string(entry.path())?;
+            let fallback_name = entry
+                .path()
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+            root_agents.push(AgentSummary {
+                name: parse_toml_string(&contents, "name").unwrap_or(fallback_name),
+                description: parse_toml_string(&contents, "description"),
+                model: parse_toml_string(&contents, "model"),
+                reasoning_effort: parse_toml_string(&contents, "model_reasoning_effort"),
+                source: *source,
+                shadowed_by: None,
+            });
+        }
+        root_agents.sort_by(|left, right| left.name.cmp(&right.name));
+
+        for mut agent in root_agents {
+            let key = agent.name.to_ascii_lowercase();
+            if let Some(existing) = active_sources.get(&key) {
+                agent.shadowed_by = Some(*existing);
+            } else {
+                active_sources.insert(key, agent.source);
+            }
+            agents.push(agent);
+        }
+    }
+
+    Ok(agents)
+}
+
+fn load_skills_from_roots(
+    roots: &[(DefinitionSource, PathBuf)],
+) -> std::io::Result<Vec<SkillSummary>> {
+    let mut skills = Vec::new();
+    let mut active_sources = BTreeMap::<String, DefinitionSource>::new();
+
+    for (source, root) in roots {
+        let mut root_skills = Vec::new();
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let skill_path = entry.path().join("SKILL.md");
+            if !skill_path.is_file() {
+                continue;
+            }
+            let contents = fs::read_to_string(skill_path)?;
+            let (name, description) = parse_skill_frontmatter(&contents);
+            root_skills.push(SkillSummary {
+                name: name.unwrap_or_else(|| entry.file_name().to_string_lossy().to_string()),
+                description,
+                source: *source,
+                shadowed_by: None,
+            });
+        }
+        root_skills.sort_by(|left, right| left.name.cmp(&right.name));
+
+        for mut skill in root_skills {
+            let key = skill.name.to_ascii_lowercase();
+            if let Some(existing) = active_sources.get(&key) {
+                skill.shadowed_by = Some(*existing);
+            } else {
+                active_sources.insert(key, skill.source);
+            }
+            skills.push(skill);
+        }
+    }
+
+    Ok(skills)
+}
+
+fn parse_toml_string(contents: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key} =");
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(value) = trimmed.strip_prefix(&prefix) else {
+            continue;
+        };
+        let value = value.trim();
+        let Some(value) = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+        else {
+            continue;
+        };
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn parse_skill_frontmatter(contents: &str) -> (Option<String>, Option<String>) {
+    let mut lines = contents.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (None, None);
+    }
+
+    let mut name = None;
+    let mut description = None;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                name = Some(value.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("description:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                description = Some(value.to_string());
+            }
+        }
+    }
+
+    (name, description)
+}
+
+fn render_agents_report(agents: &[AgentSummary]) -> String {
+    if agents.is_empty() {
+        return "No agents found.".to_string();
+    }
+
+    let total_active = agents
+        .iter()
+        .filter(|agent| agent.shadowed_by.is_none())
+        .count();
+    let mut lines = vec![
+        "Agents".to_string(),
+        format!("  {total_active} active agents"),
+        String::new(),
+    ];
+
+    for source in [
+        DefinitionSource::ProjectCodex,
+        DefinitionSource::ProjectClaude,
+        DefinitionSource::UserCodexHome,
+        DefinitionSource::UserCodex,
+        DefinitionSource::UserClaude,
+    ] {
+        let group = agents
+            .iter()
+            .filter(|agent| agent.source == source)
+            .collect::<Vec<_>>();
+        if group.is_empty() {
+            continue;
+        }
+
+        lines.push(format!("{}:", source.label()));
+        for agent in group {
+            let detail = agent_detail(agent);
+            match agent.shadowed_by {
+                Some(winner) => lines.push(format!("  (shadowed by {}) {detail}", winner.label())),
+                None => lines.push(format!("  {detail}")),
+            }
+        }
+        lines.push(String::new());
+    }
+
+    lines.join("\n").trim_end().to_string()
+}
+
+fn agent_detail(agent: &AgentSummary) -> String {
+    let mut parts = vec![agent.name.clone()];
+    if let Some(description) = &agent.description {
+        parts.push(description.clone());
+    }
+    if let Some(model) = &agent.model {
+        parts.push(model.clone());
+    }
+    if let Some(reasoning) = &agent.reasoning_effort {
+        parts.push(reasoning.clone());
+    }
+    parts.join(" · ")
+}
+
+fn render_skills_report(skills: &[SkillSummary]) -> String {
+    if skills.is_empty() {
+        return "No skills found.".to_string();
+    }
+
+    let total_active = skills
+        .iter()
+        .filter(|skill| skill.shadowed_by.is_none())
+        .count();
+    let mut lines = vec![
+        "Skills".to_string(),
+        format!("  {total_active} available skills"),
+        String::new(),
+    ];
+
+    for source in [
+        DefinitionSource::ProjectCodex,
+        DefinitionSource::ProjectClaude,
+        DefinitionSource::UserCodexHome,
+        DefinitionSource::UserCodex,
+        DefinitionSource::UserClaude,
+    ] {
+        let group = skills
+            .iter()
+            .filter(|skill| skill.source == source)
+            .collect::<Vec<_>>();
+        if group.is_empty() {
+            continue;
+        }
+
+        lines.push(format!("{}:", source.label()));
+        for skill in group {
+            let detail = match &skill.description {
+                Some(description) => format!("{} · {}", skill.name, description),
+                None => skill.name.clone(),
+            };
+            match skill.shadowed_by {
+                Some(winner) => lines.push(format!("  (shadowed by {}) {detail}", winner.label())),
+                None => lines.push(format!("  {detail}")),
+            }
+        }
+        lines.push(String::new());
+    }
+
+    lines.join("\n").trim_end().to_string()
+}
+
 #[must_use]
 pub fn handle_slash_command(
     input: &str,
@@ -617,6 +1000,8 @@ pub fn handle_slash_command(
         | SlashCommand::Export { .. }
         | SlashCommand::Session { .. }
         | SlashCommand::Plugins { .. }
+        | SlashCommand::Agents { .. }
+        | SlashCommand::Skills { .. }
         | SlashCommand::Unknown(_) => None,
     }
 }
