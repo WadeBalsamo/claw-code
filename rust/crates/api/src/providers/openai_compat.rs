@@ -185,7 +185,7 @@ impl OpenAiCompatClient {
         &self,
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
-        let request_url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let request_url = chat_completions_endpoint(&self.base_url);
         self.http
             .post(&request_url)
             .header("content-type", "application/json")
@@ -866,6 +866,15 @@ pub fn read_base_url(config: OpenAiCompatConfig) -> String {
     std::env::var(config.base_url_env).unwrap_or_else(|_| config.default_base_url.to_string())
 }
 
+fn chat_completions_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/chat/completions")
+    }
+}
+
 fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get(REQUEST_ID_HEADER)
@@ -927,8 +936,8 @@ impl StringExt for String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_completion_request, normalize_finish_reason, openai_tool_choice,
-        parse_tool_arguments, OpenAiCompatClient, OpenAiCompatConfig,
+        build_chat_completion_request, chat_completions_endpoint, normalize_finish_reason,
+        openai_tool_choice, parse_tool_arguments, OpenAiCompatClient, OpenAiCompatConfig,
     };
     use crate::error::ApiError;
     use crate::types::{
@@ -1008,6 +1017,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn endpoint_builder_accepts_base_urls_and_full_endpoints() {
+        assert_eq!(
+            chat_completions_endpoint("https://api.x.ai/v1"),
+            "https://api.x.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_endpoint("https://api.x.ai/v1/"),
+            "https://api.x.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_endpoint("https://api.x.ai/v1/chat/completions"),
+            "https://api.x.ai/v1/chat/completions"
+        );
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {

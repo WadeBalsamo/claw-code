@@ -1907,13 +1907,14 @@ fn build_runtime(
     permission_mode: PermissionMode,
 ) -> Result<ConversationRuntime<ProviderRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
+    let feature_config = build_runtime_feature_config()?;
     Ok(ConversationRuntime::new_with_features(
         session,
         ProviderRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
         CliToolExecutor::new(allowed_tools, emit_output),
         permission_policy(permission_mode),
         system_prompt,
-        build_runtime_feature_config()?,
+        &feature_config,
     ))
 }
 
