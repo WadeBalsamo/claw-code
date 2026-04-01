@@ -263,7 +263,7 @@ fn resolve_model_alias(model: &str) -> &str {
     match model {
         "opus" => "claude-opus-4-6",
         "sonnet" => "claude-sonnet-4-6",
-        "haiku" => "claude-haiku-3-5-20241022",
+        "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
     }
 }
