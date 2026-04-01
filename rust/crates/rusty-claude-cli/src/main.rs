@@ -1933,7 +1933,7 @@ fn build_runtime(
         CliToolExecutor::new(allowed_tools, emit_output),
         permission_policy(permission_mode),
         system_prompt,
-        &feature_config,
+        feature_config,
     ))
 }
 

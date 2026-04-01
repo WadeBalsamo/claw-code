@@ -600,6 +600,7 @@ mod tests {
 
     #[test]
     fn discover_with_git_includes_status_snapshot() {
+        let _guard = env_lock();
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
         std::process::Command::new("git")
@@ -624,6 +625,7 @@ mod tests {
 
     #[test]
     fn discover_with_git_includes_diff_snapshot_for_tracked_changes() {
+        let _guard = env_lock();
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
         std::process::Command::new("git")
