@@ -489,15 +489,12 @@ mod tests {
 
     #[test]
     fn jsonl_sink_persists_events() {
-        let path = std::env::temp_dir().join(format!(
-            "telemetry-jsonl-{}.log",
-            current_timestamp_ms()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("telemetry-jsonl-{}.log", current_timestamp_ms()));
         let sink = JsonlTelemetrySink::new(&path).expect("sink should create file");
 
         sink.record(TelemetryEvent::Analytics(
-            AnalyticsEvent::new("cli", "turn_completed")
-                .with_property("ok", Value::Bool(true)),
+            AnalyticsEvent::new("cli", "turn_completed").with_property("ok", Value::Bool(true)),
         ));
 
         let contents = std::fs::read_to_string(&path).expect("telemetry log should be readable");

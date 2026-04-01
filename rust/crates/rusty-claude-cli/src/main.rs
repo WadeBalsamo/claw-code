@@ -1237,6 +1237,7 @@ impl LiveCli {
         let message_count = session.messages.len();
         self.runtime = build_runtime(
             session,
+            &self.session.id,
             model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1342,7 +1343,7 @@ impl LiveCli {
         let message_count = session.messages.len();
         self.runtime = build_runtime(
             session,
-            &self.session.id,
+            &handle.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1922,6 +1923,7 @@ fn build_runtime_feature_config(
         .clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_runtime(
     session: Session,
     session_id: &str,
@@ -1935,14 +1937,13 @@ fn build_runtime(
 {
     let session_tracer = build_session_tracer(session_id)?;
     let api_client = match session_tracer.clone() {
-        Some(session_tracer) => AnthropicRuntimeClient::new(
-            model,
-            enable_tools,
-            emit_output,
-            allowed_tools.clone(),
-        )?
-        .with_session_tracer(session_tracer),
-        None => AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
+        Some(session_tracer) => {
+            AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?
+                .with_session_tracer(session_tracer)
+        }
+        None => {
+            AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?
+        }
     };
     let runtime = ConversationRuntime::new_with_features(
         session,
