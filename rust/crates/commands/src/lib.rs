@@ -212,16 +212,16 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "agents",
         aliases: &[],
-        summary: "Manage agent configurations",
+        summary: "List configured agents",
         argument_hint: None,
-        resume_supported: false,
+        resume_supported: true,
     },
     SlashCommandSpec {
         name: "skills",
         aliases: &[],
         summary: "List available skills",
         argument_hint: None,
-        resume_supported: false,
+        resume_supported: true,
     },
 ];
 
@@ -470,6 +470,29 @@ struct SkillSummary {
     description: Option<String>,
     source: DefinitionSource,
     shadowed_by: Option<DefinitionSource>,
+    origin: SkillOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillOrigin {
+    SkillsDir,
+    LegacyCommandsDir,
+}
+
+impl SkillOrigin {
+    fn detail_label(self) -> Option<&'static str> {
+        match self {
+            Self::SkillsDir => None,
+            Self::LegacyCommandsDir => Some("legacy /commands"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillRoot {
+    source: DefinitionSource,
+    path: PathBuf,
+    origin: SkillOrigin,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -585,23 +608,27 @@ pub fn handle_plugins_slash_command(
 }
 
 pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
-    if let Some(args) = args.filter(|value| !value.trim().is_empty()) {
-        return Ok(format!("Usage: /agents\nUnexpected arguments: {args}"));
+    match normalize_optional_args(args) {
+        None | Some("list") => {
+            let roots = discover_definition_roots(cwd, "agents");
+            let agents = load_agents_from_roots(&roots)?;
+            Ok(render_agents_report(&agents))
+        }
+        Some("-h" | "--help" | "help") => Ok(render_agents_usage(None)),
+        Some(args) => Ok(render_agents_usage(Some(args))),
     }
-
-    let roots = discover_definition_roots(cwd, "agents");
-    let agents = load_agents_from_roots(&roots)?;
-    Ok(render_agents_report(&agents))
 }
 
 pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
-    if let Some(args) = args.filter(|value| !value.trim().is_empty()) {
-        return Ok(format!("Usage: /skills\nUnexpected arguments: {args}"));
+    match normalize_optional_args(args) {
+        None | Some("list") => {
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            Ok(render_skills_report(&skills))
+        }
+        Some("-h" | "--help" | "help") => Ok(render_skills_usage(None)),
+        Some(args) => Ok(render_skills_usage(Some(args))),
     }
-
-    let roots = discover_definition_roots(cwd, "skills");
-    let skills = load_skills_from_roots(&roots)?;
-    Ok(render_skills_report(&skills))
 }
 
 #[must_use]
@@ -697,6 +724,83 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
     roots
 }
 
+fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
+    let mut roots = Vec::new();
+
+    for ancestor in cwd.ancestors() {
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::ProjectCodex,
+            ancestor.join(".codex").join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::ProjectCodex,
+            ancestor.join(".codex").join("commands"),
+            SkillOrigin::LegacyCommandsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join("commands"),
+            SkillOrigin::LegacyCommandsDir,
+        );
+    }
+
+    if let Ok(codex_home) = env::var("CODEX_HOME") {
+        let codex_home = PathBuf::from(codex_home);
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserCodexHome,
+            codex_home.join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserCodexHome,
+            codex_home.join("commands"),
+            SkillOrigin::LegacyCommandsDir,
+        );
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserCodex,
+            home.join(".codex").join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserCodex,
+            home.join(".codex").join("commands"),
+            SkillOrigin::LegacyCommandsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserClaude,
+            home.join(".claude").join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserClaude,
+            home.join(".claude").join("commands"),
+            SkillOrigin::LegacyCommandsDir,
+        );
+    }
+
+    roots
+}
+
 fn push_unique_root(
     roots: &mut Vec<(DefinitionSource, PathBuf)>,
     source: DefinitionSource,
@@ -704,6 +808,21 @@ fn push_unique_root(
 ) {
     if path.is_dir() && !roots.iter().any(|(_, existing)| existing == &path) {
         roots.push((source, path));
+    }
+}
+
+fn push_unique_skill_root(
+    roots: &mut Vec<SkillRoot>,
+    source: DefinitionSource,
+    path: PathBuf,
+    origin: SkillOrigin,
+) {
+    if path.is_dir() && !roots.iter().any(|existing| existing.path == path) {
+        roots.push(SkillRoot {
+            source,
+            path,
+            origin,
+        });
     }
 }
 
@@ -750,31 +869,66 @@ fn load_agents_from_roots(
     Ok(agents)
 }
 
-fn load_skills_from_roots(
-    roots: &[(DefinitionSource, PathBuf)],
-) -> std::io::Result<Vec<SkillSummary>> {
+fn load_skills_from_roots(roots: &[SkillRoot]) -> std::io::Result<Vec<SkillSummary>> {
     let mut skills = Vec::new();
     let mut active_sources = BTreeMap::<String, DefinitionSource>::new();
 
-    for (source, root) in roots {
+    for root in roots {
         let mut root_skills = Vec::new();
-        for entry in fs::read_dir(root)? {
+        for entry in fs::read_dir(&root.path)? {
             let entry = entry?;
-            if !entry.path().is_dir() {
-                continue;
+            match root.origin {
+                SkillOrigin::SkillsDir => {
+                    if !entry.path().is_dir() {
+                        continue;
+                    }
+                    let skill_path = entry.path().join("SKILL.md");
+                    if !skill_path.is_file() {
+                        continue;
+                    }
+                    let contents = fs::read_to_string(skill_path)?;
+                    let (name, description) = parse_skill_frontmatter(&contents);
+                    root_skills.push(SkillSummary {
+                        name: name
+                            .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string()),
+                        description,
+                        source: root.source,
+                        shadowed_by: None,
+                        origin: root.origin,
+                    });
+                }
+                SkillOrigin::LegacyCommandsDir => {
+                    let path = entry.path();
+                    let markdown_path = if path.is_dir() {
+                        let skill_path = path.join("SKILL.md");
+                        if !skill_path.is_file() {
+                            continue;
+                        }
+                        skill_path
+                    } else if path
+                        .extension()
+                        .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("md"))
+                    {
+                        path
+                    } else {
+                        continue;
+                    };
+
+                    let contents = fs::read_to_string(&markdown_path)?;
+                    let fallback_name = markdown_path.file_stem().map_or_else(
+                        || entry.file_name().to_string_lossy().to_string(),
+                        |stem| stem.to_string_lossy().to_string(),
+                    );
+                    let (name, description) = parse_skill_frontmatter(&contents);
+                    root_skills.push(SkillSummary {
+                        name: name.unwrap_or(fallback_name),
+                        description,
+                        source: root.source,
+                        shadowed_by: None,
+                        origin: root.origin,
+                    });
+                }
             }
-            let skill_path = entry.path().join("SKILL.md");
-            if !skill_path.is_file() {
-                continue;
-            }
-            let contents = fs::read_to_string(skill_path)?;
-            let (name, description) = parse_skill_frontmatter(&contents);
-            root_skills.push(SkillSummary {
-                name: name.unwrap_or_else(|| entry.file_name().to_string_lossy().to_string()),
-                description,
-                source: *source,
-                shadowed_by: None,
-            });
         }
         root_skills.sort_by(|left, right| left.name.cmp(&right.name));
 
@@ -830,21 +984,35 @@ fn parse_skill_frontmatter(contents: &str) -> (Option<String>, Option<String>) {
             break;
         }
         if let Some(value) = trimmed.strip_prefix("name:") {
-            let value = value.trim();
+            let value = unquote_frontmatter_value(value.trim());
             if !value.is_empty() {
-                name = Some(value.to_string());
+                name = Some(value);
             }
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("description:") {
-            let value = value.trim();
+            let value = unquote_frontmatter_value(value.trim());
             if !value.is_empty() {
-                description = Some(value.to_string());
+                description = Some(value);
             }
         }
     }
 
     (name, description)
+}
+
+fn unquote_frontmatter_value(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|trimmed| trimmed.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|trimmed| trimmed.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+        .trim()
+        .to_string()
 }
 
 fn render_agents_report(agents: &[AgentSummary]) -> String {
@@ -937,10 +1105,14 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
 
         lines.push(format!("{}:", source.label()));
         for skill in group {
-            let detail = match &skill.description {
-                Some(description) => format!("{} · {}", skill.name, description),
-                None => skill.name.clone(),
-            };
+            let mut parts = vec![skill.name.clone()];
+            if let Some(description) = &skill.description {
+                parts.push(description.clone());
+            }
+            if let Some(detail) = skill.origin.detail_label() {
+                parts.push(detail.to_string());
+            }
+            let detail = parts.join(" · ");
             match skill.shadowed_by {
                 Some(winner) => lines.push(format!("  (shadowed by {}) {detail}", winner.label())),
                 None => lines.push(format!("  {detail}")),
@@ -950,6 +1122,36 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
     }
 
     lines.join("\n").trim_end().to_string()
+}
+
+fn normalize_optional_args(args: Option<&str>) -> Option<&str> {
+    args.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn render_agents_usage(unexpected: Option<&str>) -> String {
+    let mut lines = vec![
+        "Agents".to_string(),
+        "  Usage            /agents".to_string(),
+        "  Direct CLI       claw agents".to_string(),
+        "  Sources          .codex/agents, .claude/agents, $CODEX_HOME/agents".to_string(),
+    ];
+    if let Some(args) = unexpected {
+        lines.push(format!("  Unexpected       {args}"));
+    }
+    lines.join("\n")
+}
+
+fn render_skills_usage(unexpected: Option<&str>) -> String {
+    let mut lines = vec![
+        "Skills".to_string(),
+        "  Usage            /skills".to_string(),
+        "  Direct CLI       claw skills".to_string(),
+        "  Sources          .codex/skills, .claude/skills, legacy /commands".to_string(),
+    ];
+    if let Some(args) = unexpected {
+        lines.push(format!("  Unexpected       {args}"));
+    }
+    lines.join("\n")
 }
 
 #[must_use]
@@ -1011,7 +1213,7 @@ mod tests {
         handle_plugins_slash_command, handle_slash_command, load_agents_from_roots,
         load_skills_from_roots, render_agents_report, render_plugins_report, render_skills_report,
         render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
-        DefinitionSource, SlashCommand,
+        DefinitionSource, SkillOrigin, SkillRoot, SlashCommand,
     };
     use plugins::{PluginKind, PluginManager, PluginManagerConfig, PluginMetadata, PluginSummary};
     use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
@@ -1069,6 +1271,15 @@ mod tests {
             format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
         )
         .expect("write skill");
+    }
+
+    fn write_legacy_command(root: &Path, name: &str, description: &str) {
+        fs::create_dir_all(root).expect("commands root");
+        fs::write(
+            root.join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
+        )
+        .expect("write command");
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1232,7 +1443,7 @@ mod tests {
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
         assert_eq!(slash_command_specs().len(), 25);
-        assert_eq!(resume_supported_slash_commands().len(), 11);
+        assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 
     #[test]
@@ -1425,30 +1636,80 @@ mod tests {
     fn lists_skills_from_project_and_user_roots() {
         let workspace = temp_dir("skills-workspace");
         let project_skills = workspace.join(".codex").join("skills");
+        let project_commands = workspace.join(".claude").join("commands");
         let user_home = temp_dir("skills-home");
         let user_skills = user_home.join(".codex").join("skills");
 
         write_skill(&project_skills, "plan", "Project planning guidance");
+        write_legacy_command(&project_commands, "deploy", "Legacy deployment guidance");
         write_skill(&user_skills, "plan", "User planning guidance");
         write_skill(&user_skills, "help", "Help guidance");
 
         let roots = vec![
-            (DefinitionSource::ProjectCodex, project_skills),
-            (DefinitionSource::UserCodex, user_skills),
+            SkillRoot {
+                source: DefinitionSource::ProjectCodex,
+                path: project_skills,
+                origin: SkillOrigin::SkillsDir,
+            },
+            SkillRoot {
+                source: DefinitionSource::ProjectClaude,
+                path: project_commands,
+                origin: SkillOrigin::LegacyCommandsDir,
+            },
+            SkillRoot {
+                source: DefinitionSource::UserCodex,
+                path: user_skills,
+                origin: SkillOrigin::SkillsDir,
+            },
         ];
         let report =
             render_skills_report(&load_skills_from_roots(&roots).expect("skill roots should load"));
 
         assert!(report.contains("Skills"));
-        assert!(report.contains("2 available skills"));
+        assert!(report.contains("3 available skills"));
         assert!(report.contains("Project (.codex):"));
         assert!(report.contains("plan · Project planning guidance"));
+        assert!(report.contains("Project (.claude):"));
+        assert!(report.contains("deploy · Legacy deployment guidance · legacy /commands"));
         assert!(report.contains("User (~/.codex):"));
         assert!(report.contains("(shadowed by Project (.codex)) plan · User planning guidance"));
         assert!(report.contains("help · Help guidance"));
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(user_home);
+    }
+
+    #[test]
+    fn agents_and_skills_usage_support_help_and_unexpected_args() {
+        let cwd = temp_dir("slash-usage");
+
+        let agents_help =
+            super::handle_agents_slash_command(Some("help"), &cwd).expect("agents help");
+        assert!(agents_help.contains("Usage            /agents"));
+        assert!(agents_help.contains("Direct CLI       claw agents"));
+
+        let agents_unexpected =
+            super::handle_agents_slash_command(Some("show planner"), &cwd).expect("agents usage");
+        assert!(agents_unexpected.contains("Unexpected       show planner"));
+
+        let skills_help =
+            super::handle_skills_slash_command(Some("--help"), &cwd).expect("skills help");
+        assert!(skills_help.contains("Usage            /skills"));
+        assert!(skills_help.contains("legacy /commands"));
+
+        let skills_unexpected =
+            super::handle_skills_slash_command(Some("show help"), &cwd).expect("skills usage");
+        assert!(skills_unexpected.contains("Unexpected       show help"));
+
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn parses_quoted_skill_frontmatter_values() {
+        let contents = "---\nname: \"hud\"\ndescription: 'Quoted description'\n---\n";
+        let (name, description) = super::parse_skill_frontmatter(contents);
+        assert_eq!(name.as_deref(), Some("hud"));
+        assert_eq!(description.as_deref(), Some("Quoted description"));
     }
 
     #[test]

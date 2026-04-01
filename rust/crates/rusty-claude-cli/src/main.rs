@@ -73,6 +73,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match parse_args(&args)? {
         CliAction::DumpManifests => dump_manifests(),
         CliAction::BootstrapPlan => print_bootstrap_plan(),
+        CliAction::Agents { args } => LiveCli::print_agents(args.as_deref())?,
+        CliAction::Skills { args } => LiveCli::print_skills(args.as_deref())?,
         CliAction::PrintSystemPrompt { cwd, date } => print_system_prompt(cwd, date),
         CliAction::Version => print_version(),
         CliAction::ResumeSession {
@@ -104,6 +106,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 enum CliAction {
     DumpManifests,
     BootstrapPlan,
+    Agents {
+        args: Option<String>,
+    },
+    Skills {
+        args: Option<String>,
+    },
     PrintSystemPrompt {
         cwd: PathBuf,
         date: String,
@@ -267,6 +275,12 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     match rest[0].as_str() {
         "dump-manifests" => Ok(CliAction::DumpManifests),
         "bootstrap-plan" => Ok(CliAction::BootstrapPlan),
+        "agents" => Ok(CliAction::Agents {
+            args: join_optional_args(&rest[1..]),
+        }),
+        "skills" => Ok(CliAction::Skills {
+            args: join_optional_args(&rest[1..]),
+        }),
         "system-prompt" => parse_system_prompt_args(&rest[1..]),
         "login" => Ok(CliAction::Login),
         "logout" => Ok(CliAction::Logout),
@@ -284,14 +298,37 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 permission_mode,
             })
         }
-        other if !other.starts_with('/') => Ok(CliAction::Prompt {
+        other if other.starts_with('/') => parse_direct_slash_cli_action(&rest),
+        _other => Ok(CliAction::Prompt {
             prompt: rest.join(" "),
             model,
             output_format,
             allowed_tools,
             permission_mode,
         }),
-        other => Err(format!("unknown subcommand: {other}")),
+    }
+}
+
+fn join_optional_args(args: &[String]) -> Option<String> {
+    let joined = args.join(" ");
+    let trimmed = joined.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn parse_direct_slash_cli_action(rest: &[String]) -> Result<CliAction, String> {
+    let raw = rest.join(" ");
+    match SlashCommand::parse(&raw) {
+        Some(SlashCommand::Help) => Ok(CliAction::Help),
+        Some(SlashCommand::Agents { args }) => Ok(CliAction::Agents { args }),
+        Some(SlashCommand::Skills { args }) => Ok(CliAction::Skills { args }),
+        Some(command) => Err(format!(
+            "unsupported direct slash command outside the REPL: {command_name}",
+            command_name = match command {
+                SlashCommand::Unknown(name) => format!("/{name}"),
+                _ => rest[0].clone(),
+            }
+        )),
+        None => Err(format!("unknown subcommand: {}", rest[0])),
     }
 }
 
@@ -891,6 +928,20 @@ fn run_resume_command(
                 )),
             })
         }
+        SlashCommand::Agents { args } => {
+            let cwd = env::current_dir()?;
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(handle_agents_slash_command(args.as_deref(), &cwd)?),
+            })
+        }
+        SlashCommand::Skills { args } => {
+            let cwd = env::current_dir()?;
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
+            })
+        }
         SlashCommand::Bughunter { .. }
         | SlashCommand::Commit
         | SlashCommand::Pr { .. }
@@ -903,8 +954,6 @@ fn run_resume_command(
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
         | SlashCommand::Plugins { .. }
-        | SlashCommand::Agents { .. }
-        | SlashCommand::Skills { .. }
         | SlashCommand::Unknown(_) => Err("unsupported resumed slash command".into()),
     }
 }
@@ -3718,6 +3767,8 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(out, "  claw dump-manifests")?;
     writeln!(out, "  claw bootstrap-plan")?;
+    writeln!(out, "  claw agents")?;
+    writeln!(out, "  claw skills")?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
     writeln!(out, "  claw login")?;
     writeln!(out, "  claw logout")?;
@@ -3772,6 +3823,8 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "  claw --resume session.json /status /diff /export notes.txt"
     )?;
+    writeln!(out, "  claw agents")?;
+    writeln!(out, "  claw /skills")?;
     writeln!(out, "  claw login")?;
     writeln!(out, "  claw init")?;
     Ok(())
@@ -3992,6 +4045,43 @@ mod tests {
             parse_args(&["init".to_string()]).expect("init should parse"),
             CliAction::Init
         );
+        assert_eq!(
+            parse_args(&["agents".to_string()]).expect("agents should parse"),
+            CliAction::Agents { args: None }
+        );
+        assert_eq!(
+            parse_args(&["skills".to_string()]).expect("skills should parse"),
+            CliAction::Skills { args: None }
+        );
+        assert_eq!(
+            parse_args(&["agents".to_string(), "--help".to_string()])
+                .expect("agents help should parse"),
+            CliAction::Agents {
+                args: Some("--help".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn parses_direct_agents_and_skills_slash_commands() {
+        assert_eq!(
+            parse_args(&["/agents".to_string()]).expect("/agents should parse"),
+            CliAction::Agents { args: None }
+        );
+        assert_eq!(
+            parse_args(&["/skills".to_string()]).expect("/skills should parse"),
+            CliAction::Skills { args: None }
+        );
+        assert_eq!(
+            parse_args(&["/skills".to_string(), "help".to_string()])
+                .expect("/skills help should parse"),
+            CliAction::Skills {
+                args: Some("help".to_string())
+            }
+        );
+        let error = parse_args(&["/status".to_string()])
+            .expect_err("/status should remain REPL-only when invoked directly");
+        assert!(error.contains("unsupported direct slash command"));
     }
 
     #[test]
@@ -4108,7 +4198,7 @@ mod tests {
             names,
             vec![
                 "help", "status", "compact", "clear", "cost", "config", "memory", "init", "diff",
-                "version", "export",
+                "version", "export", "agents", "skills",
             ]
         );
     }
@@ -4175,6 +4265,9 @@ mod tests {
         print_help_to(&mut help).expect("help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
         assert!(help.contains("claw init"));
+        assert!(help.contains("claw agents"));
+        assert!(help.contains("claw skills"));
+        assert!(help.contains("claw /skills"));
     }
 
     #[test]
