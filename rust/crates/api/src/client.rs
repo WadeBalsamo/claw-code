@@ -311,25 +311,12 @@ impl AnthropicClient {
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
         let request_url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let resolved_base_url = self.base_url.trim_end_matches('/');
-        eprintln!("[anthropic-client] resolved_base_url={resolved_base_url}");
-        eprintln!("[anthropic-client] request_url={request_url}");
         let request_builder = self
             .http
             .post(&request_url)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
         let mut request_builder = self.auth.apply(request_builder);
-
-        eprintln!(
-            "[anthropic-client] headers x-api-key={} authorization={} anthropic-version={ANTHROPIC_VERSION} content-type=application/json",
-            if self.auth.api_key().is_some() {
-                "[REDACTED]"
-            } else {
-                "<absent>"
-            },
-            self.auth.masked_authorization_header()
-        );
 
         request_builder = request_builder.json(request);
         request_builder.send().await.map_err(ApiError::from)
