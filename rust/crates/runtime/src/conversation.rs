@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
+use serde_json::{Map, Value};
+use telemetry::SessionTracer;
+
 use crate::compact::{
     compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
 };
@@ -97,6 +100,7 @@ pub struct ConversationRuntime<C, T> {
     max_iterations: usize,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
+    session_tracer: Option<SessionTracer>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -118,7 +122,7 @@ where
             tool_executor,
             permission_policy,
             system_prompt,
-            RuntimeFeatureConfig::default(),
+            &RuntimeFeatureConfig::default(),
         )
     }
 
@@ -129,7 +133,7 @@ where
         tool_executor: T,
         permission_policy: PermissionPolicy,
         system_prompt: Vec<String>,
-        feature_config: RuntimeFeatureConfig,
+        feature_config: &RuntimeFeatureConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
         Self {
@@ -140,7 +144,8 @@ where
             system_prompt,
             max_iterations: usize::MAX,
             usage_tracker,
-            hook_runner: HookRunner::from_feature_config(&feature_config),
+            hook_runner: HookRunner::from_feature_config(feature_config),
+            session_tracer: None,
         }
     }
 
@@ -150,14 +155,22 @@ where
         self
     }
 
+    #[must_use]
+    pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
+        self.session_tracer = Some(session_tracer);
+        self
+    }
+
     pub fn run_turn(
         &mut self,
         user_input: impl Into<String>,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
+        let user_input = user_input.into();
+        self.record_turn_started(&user_input);
         self.session
             .messages
-            .push(ConversationMessage::user_text(user_input.into()));
+            .push(ConversationMessage::user_text(user_input));
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -166,16 +179,24 @@ where
         loop {
             iterations += 1;
             if iterations > self.max_iterations {
-                return Err(RuntimeError::new(
+                let error = RuntimeError::new(
                     "conversation loop exceeded the maximum number of iterations",
-                ));
+                );
+                self.record_turn_failed(iterations, &error);
+                return Err(error);
             }
 
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
-            let events = self.api_client.stream(request)?;
+            let events = match self.api_client.stream(request) {
+                Ok(events) => events,
+                Err(error) => {
+                    self.record_turn_failed(iterations, &error);
+                    return Err(error);
+                }
+            };
             let (assistant_message, usage) = build_assistant_message(events)?;
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
@@ -190,6 +211,7 @@ where
                     _ => None,
                 })
                 .collect::<Vec<_>>();
+            self.record_assistant_iteration(iterations, &assistant_message, pending_tool_uses.len());
 
             self.session.messages.push(assistant_message.clone());
             assistant_messages.push(assistant_message);
@@ -199,6 +221,7 @@ where
             }
 
             for (tool_use_id, tool_name, input) in pending_tool_uses {
+                self.record_tool_started(iterations, &tool_name);
                 let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                     self.permission_policy
                         .authorize(&tool_name, &input, Some(*prompt))
@@ -249,17 +272,20 @@ where
                         ConversationMessage::tool_result(tool_use_id, tool_name, reason, true)
                     }
                 };
+                self.record_tool_finished(iterations, &result_message);
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
             }
         }
 
-        Ok(TurnSummary {
+        let summary = TurnSummary {
             assistant_messages,
             tool_results,
             iterations,
             usage: self.usage_tracker.cumulative_usage(),
-        })
+        };
+        self.record_turn_completed(&summary);
+        Ok(summary)
     }
 
     #[must_use]
@@ -285,6 +311,125 @@ where
     #[must_use]
     pub fn into_session(self) -> Session {
         self.session
+    }
+
+    fn record_turn_started(&self, user_input: &str) {
+        if let Some(tracer) = &self.session_tracer {
+            let mut attributes = Map::new();
+            attributes.insert(
+                "message_count_before".to_string(),
+                Value::from(u64::try_from(self.session.messages.len()).unwrap_or(u64::MAX)),
+            );
+            attributes.insert(
+                "input_chars".to_string(),
+                Value::from(u64::try_from(user_input.chars().count()).unwrap_or(u64::MAX)),
+            );
+            tracer.record("turn_started", attributes);
+        }
+    }
+
+    fn record_assistant_iteration(
+        &self,
+        iteration: usize,
+        assistant_message: &ConversationMessage,
+        pending_tool_count: usize,
+    ) {
+        if let Some(tracer) = &self.session_tracer {
+            let mut attributes = Map::new();
+            attributes.insert(
+                "iteration".to_string(),
+                Value::from(u64::try_from(iteration).unwrap_or(u64::MAX)),
+            );
+            attributes.insert(
+                "block_count".to_string(),
+                Value::from(u64::try_from(assistant_message.blocks.len()).unwrap_or(u64::MAX)),
+            );
+            attributes.insert(
+                "pending_tool_count".to_string(),
+                Value::from(u64::try_from(pending_tool_count).unwrap_or(u64::MAX)),
+            );
+            tracer.record("assistant_iteration_completed", attributes);
+        }
+    }
+
+    fn record_tool_started(&self, iteration: usize, tool_name: &str) {
+        if let Some(tracer) = &self.session_tracer {
+            let mut attributes = Map::new();
+            attributes.insert(
+                "iteration".to_string(),
+                Value::from(u64::try_from(iteration).unwrap_or(u64::MAX)),
+            );
+            attributes.insert("tool_name".to_string(), Value::String(tool_name.to_string()));
+            tracer.record("tool_execution_started", attributes);
+        }
+    }
+
+    fn record_tool_finished(&self, iteration: usize, result_message: &ConversationMessage) {
+        let Some(tracer) = &self.session_tracer else {
+            return;
+        };
+        let Some(ContentBlock::ToolResult {
+            tool_name,
+            is_error,
+            output,
+            ..
+        }) = result_message.blocks.first()
+        else {
+            return;
+        };
+        let mut attributes = Map::new();
+        attributes.insert(
+            "iteration".to_string(),
+            Value::from(u64::try_from(iteration).unwrap_or(u64::MAX)),
+        );
+        attributes.insert("tool_name".to_string(), Value::String(tool_name.clone()));
+        attributes.insert("is_error".to_string(), Value::Bool(*is_error));
+        attributes.insert(
+            "output_chars".to_string(),
+            Value::from(u64::try_from(output.chars().count()).unwrap_or(u64::MAX)),
+        );
+        tracer.record("tool_execution_finished", attributes);
+    }
+
+    fn record_turn_completed(&self, summary: &TurnSummary) {
+        if let Some(tracer) = &self.session_tracer {
+            let mut attributes = Map::new();
+            attributes.insert(
+                "assistant_message_count".to_string(),
+                Value::from(
+                    u64::try_from(summary.assistant_messages.len()).unwrap_or(u64::MAX),
+                ),
+            );
+            attributes.insert(
+                "tool_result_count".to_string(),
+                Value::from(u64::try_from(summary.tool_results.len()).unwrap_or(u64::MAX)),
+            );
+            attributes.insert(
+                "iterations".to_string(),
+                Value::from(u64::try_from(summary.iterations).unwrap_or(u64::MAX)),
+            );
+            attributes.insert(
+                "total_input_tokens".to_string(),
+                Value::from(summary.usage.input_tokens),
+            );
+            attributes.insert(
+                "total_output_tokens".to_string(),
+                Value::from(summary.usage.output_tokens),
+            );
+            tracer.record("turn_completed", attributes);
+        }
+    }
+
+    fn record_turn_failed(&self, iteration: usize, error: &RuntimeError) {
+        if let Some(tracer) = &self.session_tracer {
+            let mut attributes = Map::new();
+            attributes.insert(
+                "iteration".to_string(),
+                Value::from(u64::try_from(iteration).unwrap_or(u64::MAX)),
+            );
+            attributes.insert("error".to_string(), Value::String(error.to_string()));
+            tracer.record("turn_failed", attributes);
+        }
     }
 }
 
@@ -609,7 +754,7 @@ mod tests {
             }),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
-            RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
+            &RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
                 vec![shell_snippet("printf 'blocked by hook'; exit 2")],
                 Vec::new(),
             )),
@@ -675,7 +820,7 @@ mod tests {
             StaticToolExecutor::new().register("add", |_input| Ok("4".to_string())),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
-            RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
+            &RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
                 vec![shell_snippet("printf 'pre hook ran'")],
                 vec![shell_snippet("printf 'post hook ran'")],
             )),
@@ -697,7 +842,7 @@ mod tests {
             "post hook should preserve non-error result: {output:?}"
         );
         assert!(
-            output.contains("4"),
+            output.contains('4'),
             "tool output missing value: {output:?}"
         );
         assert!(

@@ -25,6 +25,7 @@ dependencies = [
  "runtime",
  "serde",
  "serde_json",
+ "telemetry",
  "tokio",
 ]
 
@@ -1426,6 +1427,14 @@ dependencies = [
  "thiserror",
  "walkdir",
  "yaml-rust",
+]
+
+[[package]]
+name = "telemetry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

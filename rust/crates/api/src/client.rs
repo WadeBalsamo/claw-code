@@ -6,13 +6,15 @@ use runtime::{
     OAuthTokenExchangeRequest,
 };
 use serde::Deserialize;
+use serde_json::{Map, Value};
+use telemetry::{AnthropicRequestProfile, ClientIdentity, SessionTracer};
 
 use crate::error::ApiError;
 use crate::sse::SseParser;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MESSAGES_PATH: &str = "/v1/messages";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
@@ -108,6 +110,8 @@ pub struct AnthropicClient {
     max_retries: u32,
     initial_backoff: Duration,
     max_backoff: Duration,
+    request_profile: AnthropicRequestProfile,
+    session_tracer: Option<SessionTracer>,
 }
 
 impl AnthropicClient {
@@ -120,6 +124,8 @@ impl AnthropicClient {
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
+            request_profile: AnthropicRequestProfile::default(),
+            session_tracer: None,
         }
     }
 
@@ -132,6 +138,8 @@ impl AnthropicClient {
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
+            request_profile: AnthropicRequestProfile::default(),
+            session_tracer: None,
         }
     }
 
@@ -173,6 +181,39 @@ impl AnthropicClient {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_request_profile(mut self, request_profile: AnthropicRequestProfile) -> Self {
+        self.request_profile = request_profile;
+        self
+    }
+
+    #[must_use]
+    pub fn with_client_identity(mut self, client_identity: ClientIdentity) -> Self {
+        self.request_profile.client_identity = client_identity;
+        self
+    }
+
+    #[must_use]
+    pub fn with_beta(mut self, beta: impl Into<String>) -> Self {
+        let beta = beta.into();
+        if !self.request_profile.betas.contains(&beta) {
+            self.request_profile.betas.push(beta);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_extra_body_param(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.request_profile.extra_body.insert(key.into(), value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
+        self.session_tracer = Some(session_tracer);
         self
     }
 
@@ -279,18 +320,30 @@ impl AnthropicClient {
 
         loop {
             attempts += 1;
+            self.record_request_started(request, attempts);
             match self.send_raw_request(request).await {
                 Ok(response) => match expect_success(response).await {
-                    Ok(response) => return Ok(response),
+                    Ok(response) => {
+                        self.record_request_succeeded(request, attempts, &response);
+                        return Ok(response);
+                    }
                     Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => {
+                        self.record_request_failed(request, attempts, &error);
                         last_error = Some(error);
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        self.record_request_failed(request, attempts, &error);
+                        return Err(error);
+                    }
                 },
                 Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => {
+                    self.record_request_failed(request, attempts, &error);
                     last_error = Some(error);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.record_request_failed(request, attempts, &error);
+                    return Err(error);
+                }
             }
 
             if attempts > self.max_retries {
@@ -310,16 +363,129 @@ impl AnthropicClient {
         &self,
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
-        let request_url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let request_builder = self
+        let request_url = format!("{}{}", self.base_url.trim_end_matches('/'), MESSAGES_PATH);
+        let mut request_builder = self
             .http
             .post(&request_url)
-            .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
+        for (name, value) in self.request_profile.header_pairs() {
+            request_builder = request_builder.header(name, value);
+        }
         let mut request_builder = self.auth.apply(request_builder);
 
-        request_builder = request_builder.json(request);
+        let request_body = self.request_profile.render_json_body(request)?;
+        request_builder = request_builder.json(&request_body);
         request_builder.send().await.map_err(ApiError::from)
+    }
+
+    fn record_request_started(&self, request: &MessageRequest, attempt: u32) {
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_http_request_started(
+                attempt,
+                "POST",
+                MESSAGES_PATH,
+                self.request_attributes(request),
+            );
+        }
+    }
+
+    fn record_request_succeeded(
+        &self,
+        request: &MessageRequest,
+        attempt: u32,
+        response: &reqwest::Response,
+    ) {
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_http_request_succeeded(
+                attempt,
+                "POST",
+                MESSAGES_PATH,
+                response.status().as_u16(),
+                request_id_from_headers(response.headers()),
+                self.request_attributes(request),
+            );
+        }
+    }
+
+    fn record_request_failed(&self, request: &MessageRequest, attempt: u32, error: &ApiError) {
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_http_request_failed(
+                attempt,
+                "POST",
+                MESSAGES_PATH,
+                error.to_string(),
+                error.is_retryable(),
+                self.error_attributes(request, error),
+            );
+        }
+    }
+
+    fn request_attributes(&self, request: &MessageRequest) -> Map<String, Value> {
+        let mut attributes = Map::new();
+        attributes.insert("model".to_string(), Value::String(request.model.clone()));
+        attributes.insert("stream".to_string(), Value::Bool(request.stream));
+        attributes.insert("max_tokens".to_string(), Value::from(request.max_tokens));
+        attributes.insert(
+            "message_count".to_string(),
+            Value::from(u64::try_from(request.messages.len()).unwrap_or(u64::MAX)),
+        );
+        attributes.insert(
+            "tool_count".to_string(),
+            Value::from(
+                u64::try_from(request.tools.as_ref().map_or(0, Vec::len)).unwrap_or(u64::MAX),
+            ),
+        );
+        attributes.insert(
+            "beta_count".to_string(),
+            Value::from(u64::try_from(self.request_profile.betas.len()).unwrap_or(u64::MAX)),
+        );
+        if !self.request_profile.extra_body.is_empty() {
+            attributes.insert(
+                "extra_body_keys".to_string(),
+                Value::Array(
+                    self.request_profile
+                        .extra_body
+                        .keys()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        attributes
+    }
+
+    fn error_attributes(&self, request: &MessageRequest, error: &ApiError) -> Map<String, Value> {
+        let mut attributes = self.request_attributes(request);
+        match error {
+            ApiError::Api {
+                status,
+                error_type,
+                message,
+                ..
+            } => {
+                attributes.insert("status".to_string(), Value::from(status.as_u16()));
+                if let Some(error_type) = error_type {
+                    attributes.insert("error_type".to_string(), Value::String(error_type.clone()));
+                }
+                if let Some(message) = message {
+                    attributes.insert("api_message".to_string(), Value::String(message.clone()));
+                }
+            }
+            ApiError::Http(_) => {
+                attributes.insert("error_type".to_string(), Value::String("http".to_string()));
+            }
+            ApiError::Json(_) => {
+                attributes.insert("error_type".to_string(), Value::String("json".to_string()));
+            }
+            _ => {
+                attributes.insert(
+                    "error_type".to_string(),
+                    Value::String("client".to_string()),
+                );
+            }
+        }
+        attributes
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {

@@ -8,6 +8,7 @@ use api::{
     StreamEvent, ToolChoice, ToolDefinition,
 };
 use serde_json::json;
+use telemetry::{ClientIdentity, MemoryTelemetrySink, SessionTracer, TelemetryEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -64,6 +65,14 @@ async fn send_message_posts_json_and_parses_response() {
         request.headers.get("authorization").map(String::as_str),
         Some("Bearer proxy-token")
     );
+    assert_eq!(
+        request.headers.get("anthropic-version").map(String::as_str),
+        Some("2023-06-01")
+    );
+    assert_eq!(
+        request.headers.get("user-agent").map(String::as_str),
+        Some("clawd-code/0.1.0 (rust)")
+    );
     let body: serde_json::Value =
         serde_json::from_str(&request.body).expect("request body should be json");
     assert_eq!(
@@ -73,6 +82,90 @@ async fn send_message_posts_json_and_parses_response() {
     assert!(body.get("stream").is_none());
     assert_eq!(body["tools"][0]["name"], json!("get_weather"));
     assert_eq!(body["tool_choice"]["type"], json!("auto"));
+}
+
+#[tokio::test]
+async fn send_message_applies_request_profile_and_records_telemetry() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response_with_headers(
+            "200 OK",
+            "application/json",
+            concat!(
+                "{",
+                "\"id\":\"msg_profile\",",
+                "\"type\":\"message\",",
+                "\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],",
+                "\"model\":\"claude-3-7-sonnet-latest\",",
+                "\"stop_reason\":\"end_turn\",",
+                "\"stop_sequence\":null,",
+                "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}",
+                "}"
+            ),
+            &[("request-id", "req_profile_123")],
+        )],
+    )
+    .await;
+    let sink = Arc::new(MemoryTelemetrySink::default());
+
+    let client = AnthropicClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_client_identity(ClientIdentity::new("clawd-code", "9.9.9").with_runtime("rust-cli"))
+        .with_beta("tools-2026-04-01")
+        .with_extra_body_param("metadata", json!({"source": "clawd-code"}))
+        .with_session_tracer(SessionTracer::new("session-telemetry", sink.clone()));
+
+    let response = client
+        .send_message(&sample_request(false))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.request_id.as_deref(), Some("req_profile_123"));
+
+    let captured = state.lock().await;
+    let request = captured.first().expect("server should capture request");
+    assert_eq!(
+        request.headers.get("anthropic-beta").map(String::as_str),
+        Some("tools-2026-04-01")
+    );
+    assert_eq!(
+        request.headers.get("user-agent").map(String::as_str),
+        Some("clawd-code/9.9.9 (rust-cli)")
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&request.body).expect("request body should be json");
+    assert_eq!(body["metadata"]["source"], json!("clawd-code"));
+
+    let events = sink.events();
+    assert_eq!(events.len(), 4);
+    assert!(matches!(
+        &events[0],
+        TelemetryEvent::HttpRequestStarted {
+            session_id,
+            attempt: 1,
+            method,
+            path,
+            ..
+        } if session_id == "session-telemetry" && method == "POST" && path == "/v1/messages"
+    ));
+    assert!(matches!(
+        &events[1],
+        TelemetryEvent::SessionTrace(trace) if trace.name == "http_request_started"
+    ));
+    assert!(matches!(
+        &events[2],
+        TelemetryEvent::HttpRequestSucceeded {
+            request_id,
+            status: 200,
+            ..
+        } if request_id.as_deref() == Some("req_profile_123")
+    ));
+    assert!(matches!(
+        &events[3],
+        TelemetryEvent::SessionTrace(trace) if trace.name == "http_request_succeeded"
+    ));
 }
 
 #[tokio::test]

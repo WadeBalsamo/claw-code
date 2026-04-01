@@ -4,6 +4,7 @@ mod render;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -13,8 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use api::{
     resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+    InputMessage, JsonlTelemetrySink, MessageRequest, MessageResponse, OutputContentBlock,
+    SessionTracer, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
+    ToolResultContentBlock,
 };
 
 use commands::{
@@ -44,6 +46,7 @@ fn max_tokens_for_model(model: &str) -> u32 {
 }
 const DEFAULT_DATE: &str = "2026-03-31";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
+const TELEMETRY_LOG_PATH_ENV: &str = "CLAW_TELEMETRY_LOG_PATH";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
@@ -995,6 +998,7 @@ impl LiveCli {
         let session = create_managed_session_handle()?;
         let runtime = build_runtime(
             Session::new(),
+            &session.id,
             model.clone(),
             system_prompt.clone(),
             enable_tools,
@@ -1086,6 +1090,7 @@ impl LiveCli {
         let session = self.runtime.session().clone();
         let mut runtime = build_runtime(
             session,
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1275,6 +1280,7 @@ impl LiveCli {
         self.permission_mode = permission_mode_from_label(normalized);
         self.runtime = build_runtime(
             session,
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1300,6 +1306,7 @@ impl LiveCli {
         self.session = create_managed_session_handle()?;
         self.runtime = build_runtime(
             Session::new(),
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1335,6 +1342,7 @@ impl LiveCli {
         let message_count = session.messages.len();
         self.runtime = build_runtime(
             session,
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1407,6 +1415,7 @@ impl LiveCli {
                 let message_count = session.messages.len();
                 self.runtime = build_runtime(
                     session,
+                    &handle.id,
                     self.model.clone(),
                     self.system_prompt.clone(),
                     true,
@@ -1437,6 +1446,7 @@ impl LiveCli {
         let skipped = removed == 0;
         self.runtime = build_runtime(
             result.compacted_session,
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1914,6 +1924,7 @@ fn build_runtime_feature_config(
 
 fn build_runtime(
     session: Session,
+    session_id: &str,
     model: String,
     system_prompt: Vec<String>,
     enable_tools: bool,
@@ -1922,14 +1933,42 @@ fn build_runtime(
     permission_mode: PermissionMode,
 ) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
-    Ok(ConversationRuntime::new_with_features(
+    let session_tracer = build_session_tracer(session_id)?;
+    let api_client = match session_tracer.clone() {
+        Some(session_tracer) => AnthropicRuntimeClient::new(
+            model,
+            enable_tools,
+            emit_output,
+            allowed_tools.clone(),
+        )?
+        .with_session_tracer(session_tracer),
+        None => AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
+    };
+    let runtime = ConversationRuntime::new_with_features(
         session,
-        AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
+        api_client,
         CliToolExecutor::new(allowed_tools, emit_output),
         permission_policy(permission_mode),
         system_prompt,
-        build_runtime_feature_config()?,
-    ))
+        &build_runtime_feature_config()?,
+    );
+    Ok(match session_tracer {
+        Some(session_tracer) => runtime.with_session_tracer(session_tracer),
+        None => runtime,
+    })
+}
+
+fn build_session_tracer(
+    session_id: &str,
+) -> Result<Option<SessionTracer>, Box<dyn std::error::Error>> {
+    let Some(path) = env::var_os(TELEMETRY_LOG_PATH_ENV) else {
+        return Ok(None);
+    };
+    let sink = JsonlTelemetrySink::new(PathBuf::from(path))?;
+    Ok(Some(SessionTracer::new(
+        session_id.to_string(),
+        std::sync::Arc::new(sink),
+    )))
 }
 
 struct CliPermissionPrompter {
@@ -2003,6 +2042,11 @@ impl AnthropicRuntimeClient {
             emit_output,
             allowed_tools,
         })
+    }
+
+    fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
+        self.client = self.client.with_session_tracer(session_tracer);
+        self
     }
 }
 
@@ -2364,13 +2408,13 @@ fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
         .get("backgroundTaskId")
         .and_then(|value| value.as_str())
     {
-        lines[0].push_str(&format!(" backgrounded ({task_id})"));
+        write!(&mut lines[0], " backgrounded ({task_id})").expect("write to string");
     } else if let Some(status) = parsed
         .get("returnCodeInterpretation")
         .and_then(|value| value.as_str())
         .filter(|status| !status.is_empty())
     {
-        lines[0].push_str(&format!(" {status}"));
+        write!(&mut lines[0], " {status}").expect("write to string");
     }
 
     if let Some(stdout) = parsed.get("stdout").and_then(|value| value.as_str()) {
@@ -2392,15 +2436,15 @@ fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(file);
     let start_line = file
         .get("startLine")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     let num_lines = file
         .get("numLines")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let total_lines = file
         .get("totalLines")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(num_lines);
     let content = file
         .get("content")
@@ -2426,8 +2470,7 @@ fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
     let line_count = parsed
         .get("content")
         .and_then(|value| value.as_str())
-        .map(|content| content.lines().count())
-        .unwrap_or(0);
+        .map_or(0, |content| content.lines().count());
     format!(
         "{icon} \x1b[1;32m✏️ {} {path}\x1b[0m \x1b[2m({line_count} lines)\x1b[0m",
         if kind == "create" { "Wrote" } else { "Updated" },
@@ -2458,7 +2501,7 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
     let suffix = if parsed
         .get("replaceAll")
-        .and_then(|value| value.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         " (replace all)"
@@ -2486,7 +2529,7 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
 fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
     let num_files = parsed
         .get("numFiles")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let filenames = parsed
         .get("filenames")
@@ -2510,11 +2553,11 @@ fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
 fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
     let num_matches = parsed
         .get("numMatches")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let num_files = parsed
         .get("numFiles")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let content = parsed
         .get("content")

@@ -15,3 +15,9 @@ pub use types::{
     MessageResponse, MessageStartEvent, MessageStopEvent, OutputContentBlock, StreamEvent,
     ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
+
+pub use telemetry::{
+    AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, JsonlTelemetrySink,
+    MemoryTelemetrySink, SessionTraceRecord, SessionTracer, TelemetryEvent, TelemetrySink,
+    DEFAULT_ANTHROPIC_VERSION,
+};
