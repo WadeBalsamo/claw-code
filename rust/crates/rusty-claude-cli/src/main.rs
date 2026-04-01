@@ -2044,6 +2044,14 @@ impl ApiClient for AnthropicRuntimeClient {
                     },
                     ApiStreamEvent::ContentBlockStop(_) => {
                         if let Some((id, name, input)) = pending_tool.take() {
+                            // Display tool call now that input is fully accumulated
+                            writeln!(
+                                stdout,
+                                "\n{}",
+                                format_tool_call_start(&name, &input)
+                            )
+                            .and_then(|()| stdout.flush())
+                            .map_err(|error| RuntimeError::new(error.to_string()))?;
                             events.push(AssistantEvent::ToolUse { id, name, input });
                         }
                     }
@@ -2210,15 +2218,15 @@ fn push_output_block(
             }
         }
         OutputContentBlock::ToolUse { id, name, input } => {
-            writeln!(
-                out,
-                "
-{}",
-                format_tool_call_start(&name, &input.to_string())
-            )
-            .and_then(|()| out.flush())
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-            *pending_tool = Some((id, name, input.to_string()));
+            // During streaming, the initial content_block_start has an empty input ({}).
+            // The real input arrives via input_json_delta events.
+            // Start with empty string so deltas build the correct JSON.
+            let initial_input = if input.is_object() && input.as_object().map_or(false, |o| o.is_empty()) {
+                String::new()
+            } else {
+                input.to_string()
+            };
+            *pending_tool = Some((id, name, initial_input));
         }
     }
     Ok(())
