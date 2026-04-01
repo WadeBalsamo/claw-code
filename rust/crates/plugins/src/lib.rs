@@ -1,6 +1,6 @@
 mod hooks;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,8 +108,7 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub description: String,
-    #[serde(default)]
-    pub permissions: Vec<String>,
+    pub permissions: Vec<PluginPermission>,
     #[serde(rename = "defaultEnabled", default)]
     pub default_enabled: bool,
     #[serde(default)]
@@ -122,6 +121,34 @@ pub struct PluginManifest {
     pub commands: Vec<PluginCommandManifest>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginPermission {
+    Read,
+    Write,
+    Execute,
+}
+
+impl PluginPermission {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Execute => "execute",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "execute" => Some(Self::Execute),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginToolManifest {
     pub name: String,
@@ -131,8 +158,35 @@ pub struct PluginToolManifest {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(rename = "requiredPermission", default = "default_tool_permission")]
-    pub required_permission: String,
+    pub required_permission: PluginToolPermission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginToolPermission {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl PluginToolPermission {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read-only" => Some(Self::ReadOnly),
+            "workspace-write" => Some(Self::WorkspaceWrite),
+            "danger-full-access" => Some(Self::DangerFullAccess),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,6 +205,38 @@ pub struct PluginCommandManifest {
     pub command: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawPluginManifest {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(rename = "defaultEnabled", default)]
+    pub default_enabled: bool,
+    #[serde(default)]
+    pub hooks: PluginHooks,
+    #[serde(default)]
+    pub lifecycle: PluginLifecycle,
+    #[serde(default)]
+    pub tools: Vec<RawPluginToolManifest>,
+    #[serde(default)]
+    pub commands: Vec<PluginCommandManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RawPluginToolManifest {
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "inputSchema")]
+    pub input_schema: Value,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(rename = "requiredPermission", default = "default_raw_tool_permission")]
+    pub required_permission: String,
+}
+
 type PluginPackageManifest = PluginManifest;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +246,7 @@ pub struct PluginTool {
     definition: PluginToolDefinition,
     command: String,
     args: Vec<String>,
-    required_permission: String,
+    required_permission: PluginToolPermission,
     root: Option<PathBuf>,
 }
 
@@ -172,7 +258,7 @@ impl PluginTool {
         definition: PluginToolDefinition,
         command: impl Into<String>,
         args: Vec<String>,
-        required_permission: impl Into<String>,
+        required_permission: PluginToolPermission,
         root: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -181,7 +267,7 @@ impl PluginTool {
             definition,
             command: command.into(),
             args,
-            required_permission: required_permission.into(),
+            required_permission,
             root,
         }
     }
@@ -198,7 +284,7 @@ impl PluginTool {
 
     #[must_use]
     pub fn required_permission(&self) -> &str {
-        &self.required_permission
+        self.required_permission.as_str()
     }
 
     pub fn execute(&self, input: &Value) -> Result<String, PluginError> {
@@ -245,7 +331,7 @@ impl PluginTool {
     }
 }
 
-fn default_tool_permission() -> String {
+fn default_raw_tool_permission() -> String {
     "danger-full-access".to_string()
 }
 
@@ -685,10 +771,74 @@ pub struct UpdateOutcome {
     pub install_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginManifestValidationError {
+    EmptyField { field: &'static str },
+    EmptyEntryField {
+        kind: &'static str,
+        field: &'static str,
+        name: Option<String>,
+    },
+    InvalidPermission { permission: String },
+    DuplicatePermission { permission: String },
+    DuplicateEntry { kind: &'static str, name: String },
+    MissingPath { kind: &'static str, path: PathBuf },
+    InvalidToolInputSchema { tool_name: String },
+    InvalidToolRequiredPermission {
+        tool_name: String,
+        permission: String,
+    },
+}
+
+impl Display for PluginManifestValidationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyField { field } => {
+                write!(f, "plugin manifest {field} cannot be empty")
+            }
+            Self::EmptyEntryField { kind, field, name } => match name {
+                Some(name) if !name.is_empty() => {
+                    write!(f, "plugin {kind} `{name}` {field} cannot be empty")
+                }
+                _ => write!(f, "plugin {kind} {field} cannot be empty"),
+            },
+            Self::InvalidPermission { permission } => {
+                write!(
+                    f,
+                    "plugin manifest permission `{permission}` must be one of read, write, or execute"
+                )
+            }
+            Self::DuplicatePermission { permission } => {
+                write!(f, "plugin manifest permission `{permission}` is duplicated")
+            }
+            Self::DuplicateEntry { kind, name } => {
+                write!(f, "plugin {kind} `{name}` is duplicated")
+            }
+            Self::MissingPath { kind, path } => {
+                write!(f, "{kind} path `{}` does not exist", path.display())
+            }
+            Self::InvalidToolInputSchema { tool_name } => {
+                write!(
+                    f,
+                    "plugin tool `{tool_name}` inputSchema must be a JSON object"
+                )
+            }
+            Self::InvalidToolRequiredPermission {
+                tool_name,
+                permission,
+            } => write!(
+                f,
+                "plugin tool `{tool_name}` requiredPermission `{permission}` must be read-only, workspace-write, or danger-full-access"
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum PluginError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    ManifestValidation(Vec<PluginManifestValidationError>),
     InvalidManifest(String),
     NotFound(String),
     CommandFailed(String),
@@ -699,6 +849,15 @@ impl Display for PluginError {
         match self {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
+            Self::ManifestValidation(errors) => {
+                for (index, error) in errors.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{error}")?;
+                }
+                Ok(())
+            }
             Self::InvalidManifest(message)
             | Self::NotFound(message)
             | Self::CommandFailed(message) => write!(f, "{message}"),
@@ -991,7 +1150,7 @@ impl PluginManager {
             let install_path = install_root.join(sanitize_plugin_id(&plugin_id));
             let now = unix_time_ms();
             let existing_record = registry.plugins.get(&plugin_id);
-            let needs_sync = existing_record.map_or(true, |record| {
+            let needs_sync = existing_record.is_none_or(|record| {
                 record.kind != PluginKind::Bundled
                     || record.version != manifest.version
                     || record.name != manifest.name
@@ -1261,7 +1420,7 @@ fn plugin_manifest_path(root: &Path) -> Result<PathBuf, PluginError> {
 }
 
 fn validate_named_strings(entries: &[String], kind: &str) -> Result<(), PluginError> {
-    let mut seen = BTreeMap::<&str, ()>::new();
+    let mut seen = BTreeSet::<&str>::new();
     for entry in entries {
         let trimmed = entry.trim();
         if trimmed.is_empty() {
@@ -1269,7 +1428,7 @@ fn validate_named_strings(entries: &[String], kind: &str) -> Result<(), PluginEr
                 "plugin manifest {kind} cannot be empty"
             )));
         }
-        if seen.insert(trimmed, ()).is_some() {
+        if !seen.insert(trimmed) {
             return Err(PluginError::InvalidManifest(format!(
                 "plugin manifest {kind} `{trimmed}` is duplicated"
             )));
@@ -1283,7 +1442,7 @@ fn validate_named_commands(
     entries: &[impl NamedCommand],
     kind: &str,
 ) -> Result<(), PluginError> {
-    let mut seen = BTreeMap::<&str, ()>::new();
+    let mut seen = BTreeSet::<&str>::new();
     for entry in entries {
         let name = entry.name().trim();
         if name.is_empty() {
@@ -1291,7 +1450,7 @@ fn validate_named_commands(
                 "plugin {kind} name cannot be empty"
             )));
         }
-        if seen.insert(name, ()).is_some() {
+        if !seen.insert(name) {
             return Err(PluginError::InvalidManifest(format!(
                 "plugin {kind} `{name}` is duplicated"
             )));
@@ -1796,6 +1955,59 @@ mod tests {
         log_path
     }
 
+    fn write_tool_plugin(root: &Path, name: &str, version: &str) {
+        let script_path = root.join("tools").join("echo-json.sh");
+        write_file(
+            &script_path,
+            "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$CLAWD_PLUGIN_ID\" \"$CLAWD_TOOL_NAME\" \"$INPUT\"\n",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).expect("chmod");
+        }
+        write_file(
+            root.join(MANIFEST_RELATIVE_PATH).as_path(),
+            format!(
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"tool plugin\",\n  \"tools\": [\n    {{\n      \"name\": \"plugin_echo\",\n      \"description\": \"Echo JSON input\",\n      \"inputSchema\": {{\"type\": \"object\", \"properties\": {{\"message\": {{\"type\": \"string\"}}}}, \"required\": [\"message\"], \"additionalProperties\": false}},\n      \"command\": \"./tools/echo-json.sh\",\n      \"requiredPermission\": \"workspace-write\"\n    }}\n  ]\n}}"
+            )
+            .as_str(),
+        );
+    }
+
+    fn write_bundled_plugin(root: &Path, name: &str, version: &str, default_enabled: bool) {
+        write_file(
+            root.join(MANIFEST_RELATIVE_PATH).as_path(),
+            format!(
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"bundled plugin\",\n  \"defaultEnabled\": {}\n}}",
+                if default_enabled { "true" } else { "false" }
+            )
+            .as_str(),
+        );
+    }
+
+    fn load_enabled_plugins(path: &Path) -> BTreeMap<String, bool> {
+        let contents = fs::read_to_string(path).expect("settings should exist");
+        let root: Value = serde_json::from_str(&contents).expect("settings json");
+        root.get("enabledPlugins")
+            .and_then(Value::as_object)
+            .map(|enabled_plugins| {
+                enabled_plugins
+                    .iter()
+                    .map(|(plugin_id, value)| {
+                        (
+                            plugin_id.clone(),
+                            value.as_bool().expect("plugin state should be a bool"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn load_plugin_from_directory_validates_required_fields() {
         let root = temp_dir("manifest-required");
@@ -1978,6 +2190,70 @@ mod tests {
     }
 
     #[test]
+    fn auto_installs_bundled_plugins_into_the_registry() {
+        let config_home = temp_dir("bundled-home");
+        let bundled_root = temp_dir("bundled-root");
+        write_bundled_plugin(&bundled_root.join("starter"), "starter", "0.1.0", false);
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let manager = PluginManager::new(config);
+
+        let installed = manager
+            .list_installed_plugins()
+            .expect("bundled plugins should auto-install");
+        assert!(installed.iter().any(|plugin| {
+            plugin.metadata.id == "starter@bundled"
+                && plugin.metadata.kind == PluginKind::Bundled
+                && !plugin.enabled
+        }));
+
+        let registry = manager.load_registry().expect("registry should exist");
+        let record = registry
+            .plugins
+            .get("starter@bundled")
+            .expect("bundled plugin should be recorded");
+        assert_eq!(record.kind, PluginKind::Bundled);
+        assert!(record.install_path.exists());
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn persists_bundled_plugin_enable_state_across_reloads() {
+        let config_home = temp_dir("bundled-state-home");
+        let bundled_root = temp_dir("bundled-state-root");
+        write_bundled_plugin(&bundled_root.join("starter"), "starter", "0.1.0", false);
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let mut manager = PluginManager::new(config.clone());
+
+        manager
+            .enable("starter@bundled")
+            .expect("enable bundled plugin should succeed");
+        assert_eq!(
+            load_enabled_plugins(&manager.settings_path()).get("starter@bundled"),
+            Some(&true)
+        );
+
+        let mut reloaded_config = PluginManagerConfig::new(&config_home);
+        reloaded_config.bundled_root = Some(bundled_root.clone());
+        reloaded_config.enabled_plugins = load_enabled_plugins(&manager.settings_path());
+        let reloaded_manager = PluginManager::new(reloaded_config);
+        let reloaded = reloaded_manager
+            .list_installed_plugins()
+            .expect("bundled plugins should still be listed");
+        assert!(reloaded
+            .iter()
+            .any(|plugin| { plugin.metadata.id == "starter@bundled" && plugin.enabled }));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
     fn validates_plugin_source_before_install() {
         let config_home = temp_dir("validate-home");
         let source_root = temp_dir("validate-source");
@@ -2058,6 +2334,34 @@ mod tests {
 
         let log = fs::read_to_string(&log_path).expect("lifecycle log should exist");
         assert_eq!(log, "init\nshutdown\n");
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn aggregates_and_executes_plugin_tools() {
+        let config_home = temp_dir("tool-home");
+        let source_root = temp_dir("tool-source");
+        write_tool_plugin(&source_root, "tool-demo", "1.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        manager
+            .install(source_root.to_str().expect("utf8 path"))
+            .expect("install should succeed");
+
+        let tools = manager.aggregated_tools().expect("tools should aggregate");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].definition().name, "plugin_echo");
+        assert_eq!(tools[0].required_permission(), "workspace-write");
+
+        let output = tools[0]
+            .execute(&serde_json::json!({ "message": "hello" }))
+            .expect("plugin tool should execute");
+        let payload: Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(payload["plugin"], "tool-demo@external");
+        assert_eq!(payload["tool"], "plugin_echo");
+        assert_eq!(payload["input"]["message"], "hello");
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(source_root);

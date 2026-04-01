@@ -3301,6 +3301,7 @@ mod tests {
     use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
     use serde_json::json;
     use std::path::PathBuf;
+    use tools::GlobalToolRegistry;
 
     #[test]
     fn defaults_to_repl_when_no_args() {
@@ -3548,7 +3549,7 @@ mod tests {
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
         assert!(help.contains(
-            "/plugins [list|install <source>|enable <id>|disable <id>|uninstall <id>|update <id>]"
+            "/plugins [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
         assert!(help.contains("/exit"));
     }

@@ -3096,8 +3096,9 @@ mod tests {
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
         execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        AgentInput, AgentJob, SubagentToolExecutor,
+        AgentInput, AgentJob, GlobalToolRegistry, SubagentToolExecutor,
     };
+    use plugins::{PluginTool, PluginToolDefinition};
     use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
     use serde_json::json;
 
@@ -3112,6 +3113,17 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("clawd-tools-{unique}-{name}"))
+    }
+
+    fn make_executable(path: &PathBuf) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("chmod");
+        }
     }
 
     #[test]
@@ -3141,6 +3153,75 @@ mod tests {
     fn rejects_unknown_tool_names() {
         let error = execute_tool("nope", &json!({})).expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool"));
+    }
+
+    #[test]
+    fn global_registry_registers_and_executes_plugin_tools() {
+        let script = temp_path("plugin-tool.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$CLAWD_PLUGIN_ID\" \"$CLAWD_TOOL_NAME\" \"$INPUT\"\n",
+        )
+        .expect("write script");
+        make_executable(&script);
+
+        let registry = GlobalToolRegistry::with_plugin_tools(vec![PluginTool::new(
+            "demo@external",
+            "demo",
+            PluginToolDefinition {
+                name: "plugin_echo".to_string(),
+                description: Some("Echo plugin input".to_string()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "message": { "type": "string" } },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }),
+            },
+            script.display().to_string(),
+            Vec::new(),
+            "workspace-write",
+            script.parent().map(PathBuf::from),
+        )])
+        .expect("registry should build");
+
+        let names = registry
+            .definitions(None)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"bash".to_string()));
+        assert!(names.contains(&"plugin_echo".to_string()));
+
+        let output = registry
+            .execute("plugin_echo", &json!({ "message": "hello" }))
+            .expect("plugin tool should execute");
+        let payload: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(payload["plugin"], "demo@external");
+        assert_eq!(payload["tool"], "plugin_echo");
+        assert_eq!(payload["input"]["message"], "hello");
+
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
+    fn global_registry_rejects_conflicting_plugin_tool_names() {
+        let error = GlobalToolRegistry::with_plugin_tools(vec![PluginTool::new(
+            "demo@external",
+            "demo",
+            PluginToolDefinition {
+                name: "read-file".to_string(),
+                description: Some("Conflicts with builtin".to_string()),
+                input_schema: json!({ "type": "object" }),
+            },
+            "echo".to_string(),
+            Vec::new(),
+            "read-only",
+            None,
+        )])
+        .expect_err("conflicting plugin tool should fail");
+
+        assert!(error.contains("conflicts with already-registered tool `read_file`"));
     }
 
     #[test]

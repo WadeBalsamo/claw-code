@@ -1,4 +1,4 @@
-use plugins::{PluginError, PluginKind, PluginManager, PluginSummary};
+use plugins::{PluginError, PluginManager, PluginSummary};
 use runtime::{compact_session, CompactionConfig, Session};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +176,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "plugins",
         summary: "List or manage plugins",
         argument_hint: Some(
-            "[list|install <source>|enable <id>|disable <id>|uninstall <id>|update <id>]",
+            "[list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
         ),
         resume_supported: false,
     },
@@ -363,6 +363,7 @@ pub struct PluginsCommandResult {
     pub reload_runtime: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn handle_plugins_slash_command(
     action: Option<&str>,
     target: Option<&str>,
@@ -482,19 +483,14 @@ pub fn render_plugins_report(plugins: &[PluginSummary]) -> String {
         return lines.join("\n");
     }
     for plugin in plugins {
-        let kind = match plugin.metadata.kind {
-            PluginKind::Builtin => "builtin",
-            PluginKind::Bundled => "bundled",
-            PluginKind::External => "external",
-        };
         let enabled = if plugin.enabled {
             "enabled"
         } else {
             "disabled"
         };
         lines.push(format!(
-            "  {id:<24} {kind:<8} {enabled:<8} v{version}",
-            id = plugin.metadata.id,
+            "  {name:<20} v{version:<10} {enabled}",
+            name = plugin.metadata.name,
             version = plugin.metadata.version,
         ));
     }
@@ -737,6 +733,20 @@ mod tests {
                 target: None
             })
         );
+        assert_eq!(
+            SlashCommand::parse("/plugins enable demo"),
+            Some(SlashCommand::Plugins {
+                action: Some("enable".to_string()),
+                target: Some("demo".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/plugins disable demo"),
+            Some(SlashCommand::Plugins {
+                action: Some("disable".to_string()),
+                target: Some("demo".to_string())
+            })
+        );
     }
 
     #[test]
@@ -766,7 +776,7 @@ mod tests {
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
         assert!(help.contains(
-            "/plugins [list|install <source>|enable <id>|disable <id>|uninstall <id>|update <id>]"
+            "/plugins [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
         assert_eq!(slash_command_specs().len(), 23);
         assert_eq!(resume_supported_slash_commands().len(), 11);
@@ -902,10 +912,10 @@ mod tests {
             },
         ]);
 
-        assert!(rendered.contains("demo@external"));
+        assert!(rendered.contains("demo"));
         assert!(rendered.contains("v1.2.3"));
         assert!(rendered.contains("enabled"));
-        assert!(rendered.contains("sample@external"));
+        assert!(rendered.contains("sample"));
         assert!(rendered.contains("v0.9.0"));
         assert!(rendered.contains("disabled"));
     }
@@ -932,7 +942,7 @@ mod tests {
         let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
             .expect("list command should succeed");
         assert!(!list.reload_runtime);
-        assert!(list.message.contains("demo@external"));
+        assert!(list.message.contains("demo"));
         assert!(list.message.contains("v1.0.0"));
         assert!(list.message.contains("enabled"));
 
@@ -963,7 +973,7 @@ mod tests {
 
         let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
             .expect("list command should succeed");
-        assert!(list.message.contains("demo@external"));
+        assert!(list.message.contains("demo"));
         assert!(list.message.contains("disabled"));
 
         let enable = handle_plugins_slash_command(Some("enable"), Some("demo"), &mut manager)
@@ -975,7 +985,7 @@ mod tests {
 
         let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
             .expect("list command should succeed");
-        assert!(list.message.contains("demo@external"));
+        assert!(list.message.contains("demo"));
         assert!(list.message.contains("enabled"));
 
         let _ = fs::remove_dir_all(config_home);
@@ -996,8 +1006,8 @@ mod tests {
         let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
             .expect("list command should succeed");
         assert!(!list.reload_runtime);
-        assert!(list.message.contains("starter@bundled"));
-        assert!(list.message.contains("bundled"));
+        assert!(list.message.contains("starter"));
+        assert!(list.message.contains("v0.1.0"));
         assert!(list.message.contains("disabled"));
 
         let _ = fs::remove_dir_all(config_home);

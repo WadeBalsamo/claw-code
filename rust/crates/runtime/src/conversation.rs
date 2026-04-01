@@ -189,8 +189,10 @@ where
         feature_config: RuntimeFeatureConfig,
         plugin_registry: PluginRegistry,
     ) -> Result<Self, RuntimeError> {
-        let plugin_hook_runner = PluginHookRunner::from_registry(&plugin_registry)
-            .map_err(|error| RuntimeError::new(format!("plugin hook registration failed: {error}")))?;
+        let plugin_hook_runner =
+            PluginHookRunner::from_registry(&plugin_registry).map_err(|error| {
+                RuntimeError::new(format!("plugin hook registration failed: {error}"))
+            })?;
         plugin_registry
             .initialize()
             .map_err(|error| RuntimeError::new(format!("plugin initialization failed: {error}")))?;
@@ -219,6 +221,7 @@ where
         self
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn run_turn(
         &mut self,
         user_input: impl Into<String>,
@@ -292,56 +295,64 @@ where
                             if plugin_pre_hook_result.is_denied() {
                                 let deny_message =
                                     format!("PreToolUse hook denied tool `{tool_name}`");
+                                let mut messages = pre_hook_result.messages().to_vec();
+                                messages.extend(plugin_pre_hook_result.messages().iter().cloned());
                                 ConversationMessage::tool_result(
                                     tool_use_id,
                                     tool_name,
-                                    format_hook_message(
-                                        plugin_pre_hook_result.messages(),
-                                        &deny_message,
-                                    ),
+                                    format_hook_message(&messages, &deny_message),
                                     true,
                                 )
                             } else {
-                            let (mut output, mut is_error) =
-                                match self.tool_executor.execute(&tool_name, &input) {
-                                    Ok(output) => (output, false),
-                                    Err(error) => (error.to_string(), true),
-                                };
-                            output = merge_hook_feedback(pre_hook_result.messages(), output, false);
-                            output = merge_hook_feedback(
-                                plugin_pre_hook_result.messages(),
-                                output,
-                                false,
-                            );
+                                let (mut output, mut is_error) =
+                                    match self.tool_executor.execute(&tool_name, &input) {
+                                        Ok(output) => (output, false),
+                                        Err(error) => (error.to_string(), true),
+                                    };
+                                output =
+                                    merge_hook_feedback(pre_hook_result.messages(), output, false);
+                                output = merge_hook_feedback(
+                                    plugin_pre_hook_result.messages(),
+                                    output,
+                                    false,
+                                );
 
-                            let post_hook_result = self
-                                .hook_runner
-                                .run_post_tool_use(&tool_name, &input, &output, is_error);
-                            if post_hook_result.is_denied() {
-                                is_error = true;
-                            }
-                            output = merge_hook_feedback(
-                                post_hook_result.messages(),
-                                output,
-                                post_hook_result.is_denied(),
-                            );
-                            let plugin_post_hook_result =
-                                self.run_plugin_post_tool_use(&tool_name, &input, &output, is_error);
-                            if plugin_post_hook_result.is_denied() {
-                                is_error = true;
-                            }
-                            output = merge_hook_feedback(
-                                plugin_post_hook_result.messages(),
-                                output,
-                                plugin_post_hook_result.is_denied(),
-                            );
+                                let hook_output = output.clone();
+                                let post_hook_result = self.hook_runner.run_post_tool_use(
+                                    &tool_name,
+                                    &input,
+                                    &hook_output,
+                                    is_error,
+                                );
+                                let plugin_post_hook_result = self.run_plugin_post_tool_use(
+                                    &tool_name,
+                                    &input,
+                                    &hook_output,
+                                    is_error,
+                                );
+                                if post_hook_result.is_denied() {
+                                    is_error = true;
+                                }
+                                if plugin_post_hook_result.is_denied() {
+                                    is_error = true;
+                                }
+                                output = merge_hook_feedback(
+                                    post_hook_result.messages(),
+                                    output,
+                                    post_hook_result.is_denied(),
+                                );
+                                output = merge_hook_feedback(
+                                    plugin_post_hook_result.messages(),
+                                    output,
+                                    plugin_post_hook_result.is_denied(),
+                                );
 
-                            ConversationMessage::tool_result(
-                                tool_use_id,
-                                tool_name,
-                                output,
-                                is_error,
-                            )
+                                ConversationMessage::tool_result(
+                                    tool_use_id,
+                                    tool_name,
+                                    output,
+                                    is_error,
+                                )
                             }
                         }
                     }
@@ -511,11 +522,11 @@ fn flush_text_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
     }
 }
 
-fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
-    if result.messages().is_empty() {
+fn format_hook_message(messages: &[String], fallback: &str) -> String {
+    if messages.is_empty() {
         fallback.to_string()
     } else {
-        result.messages().join("\n")
+        messages.join("\n")
     }
 }
 
