@@ -12,9 +12,15 @@ pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>
 pub trait Provider {
     type Stream;
 
-    fn send_message<'a>(&'a self, request: &'a MessageRequest) -> ProviderFuture<'a, MessageResponse>;
+    fn send_message<'a>(
+        &'a self,
+        request: &'a MessageRequest,
+    ) -> ProviderFuture<'a, MessageResponse>;
 
-    fn stream_message<'a>(&'a self, request: &'a MessageRequest) -> ProviderFuture<'a, Self::Stream>;
+    fn stream_message<'a>(
+        &'a self,
+        request: &'a MessageRequest,
+    ) -> ProviderFuture<'a, Self::Stream>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +33,6 @@ pub enum ProviderKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderMetadata {
     pub provider: ProviderKind,
-    pub canonical_model: &'static str,
     pub auth_env: &'static str,
     pub base_url_env: &'static str,
     pub default_base_url: &'static str,
@@ -38,7 +43,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "opus",
         ProviderMetadata {
             provider: ProviderKind::Anthropic,
-            canonical_model: "claude-opus-4-6",
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
             default_base_url: anthropic::DEFAULT_BASE_URL,
@@ -48,7 +52,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "sonnet",
         ProviderMetadata {
             provider: ProviderKind::Anthropic,
-            canonical_model: "claude-sonnet-4-6",
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
             default_base_url: anthropic::DEFAULT_BASE_URL,
@@ -58,7 +61,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "haiku",
         ProviderMetadata {
             provider: ProviderKind::Anthropic,
-            canonical_model: "claude-haiku-4-5-20251213",
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
             default_base_url: anthropic::DEFAULT_BASE_URL,
@@ -68,7 +70,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "grok",
         ProviderMetadata {
             provider: ProviderKind::Xai,
-            canonical_model: "grok-3",
             auth_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
@@ -78,7 +79,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "grok-3",
         ProviderMetadata {
             provider: ProviderKind::Xai,
-            canonical_model: "grok-3",
             auth_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
@@ -88,7 +88,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "grok-mini",
         ProviderMetadata {
             provider: ProviderKind::Xai,
-            canonical_model: "grok-3-mini",
             auth_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
@@ -98,7 +97,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "grok-3-mini",
         ProviderMetadata {
             provider: ProviderKind::Xai,
-            canonical_model: "grok-3-mini",
             auth_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
@@ -108,7 +106,6 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
         "grok-2",
         ProviderMetadata {
             provider: ProviderKind::Xai,
-            canonical_model: "grok-2",
             auth_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
@@ -122,7 +119,23 @@ pub fn resolve_model_alias(model: &str) -> String {
     let lower = trimmed.to_ascii_lowercase();
     MODEL_REGISTRY
         .iter()
-        .find_map(|(alias, metadata)| (*alias == lower).then_some(metadata.canonical_model))
+        .find_map(|(alias, metadata)| {
+            (*alias == lower).then_some(match metadata.provider {
+                ProviderKind::Anthropic => match *alias {
+                    "opus" => "claude-opus-4-6",
+                    "sonnet" => "claude-sonnet-4-6",
+                    "haiku" => "claude-haiku-4-5-20251213",
+                    _ => trimmed,
+                },
+                ProviderKind::Xai => match *alias {
+                    "grok" | "grok-3" => "grok-3",
+                    "grok-mini" | "grok-3-mini" => "grok-3-mini",
+                    "grok-2" => "grok-2",
+                    _ => trimmed,
+                },
+                ProviderKind::OpenAi => trimmed,
+            })
+        })
         .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
 }
 
@@ -132,7 +145,6 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
     if canonical.starts_with("claude") {
         return Some(ProviderMetadata {
             provider: ProviderKind::Anthropic,
-            canonical_model: Box::leak(canonical.into_boxed_str()),
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
             default_base_url: anthropic::DEFAULT_BASE_URL,
@@ -141,7 +153,6 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
     if canonical.starts_with("grok") {
         return Some(ProviderMetadata {
             provider: ProviderKind::Xai,
-            canonical_model: Box::leak(canonical.into_boxed_str()),
             auth_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
@@ -191,7 +202,10 @@ mod tests {
     #[test]
     fn detects_provider_from_model_name_first() {
         assert_eq!(detect_provider_kind("grok"), ProviderKind::Xai);
-        assert_eq!(detect_provider_kind("claude-sonnet-4-6"), ProviderKind::Anthropic);
+        assert_eq!(
+            detect_provider_kind("claude-sonnet-4-6"),
+            ProviderKind::Anthropic
+        );
     }
 
     #[test]

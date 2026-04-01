@@ -8,10 +8,12 @@ use runtime::{
 use serde::Deserialize;
 
 use crate::error::ApiError;
+
+use super::{Provider, ProviderFuture};
 use crate::sse::SseParser;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -41,7 +43,10 @@ impl AuthSource {
             }),
             (Some(api_key), None) => Ok(Self::ApiKey(api_key)),
             (None, Some(bearer_token)) => Ok(Self::BearerToken(bearer_token)),
-            (None, None) => Err(ApiError::missing_credentials("Anthropic", &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])),
+            (None, None) => Err(ApiError::missing_credentials(
+                "Anthropic",
+                &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            )),
         }
     }
 
@@ -362,7 +367,10 @@ impl AuthSource {
                 }
             }
             Ok(Some(token_set)) => Ok(Self::BearerToken(token_set.access_token)),
-            Ok(None) => Err(ApiError::missing_credentials("Anthropic", &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])),
+            Ok(None) => Err(ApiError::missing_credentials(
+                "Anthropic",
+                &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            )),
             Err(error) => Err(error),
         }
     }
@@ -380,6 +388,12 @@ pub fn resolve_saved_oauth_token(config: &OAuthConfig) -> Result<Option<OAuthTok
         return Ok(None);
     };
     resolve_saved_oauth_token_set(config, token_set).map(Some)
+}
+
+pub fn has_auth_from_env_or_saved() -> Result<bool, ApiError> {
+    Ok(read_env_non_empty("ANTHROPIC_API_KEY")?.is_some()
+        || read_env_non_empty("ANTHROPIC_AUTH_TOKEN")?.is_some()
+        || load_saved_oauth_token()?.is_some())
 }
 
 pub fn resolve_startup_auth_source<F>(load_oauth_config: F) -> Result<AuthSource, ApiError>
@@ -400,7 +414,10 @@ where
     }
 
     let Some(token_set) = load_saved_oauth_token()? else {
-        return Err(ApiError::missing_credentials("Anthropic", &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]));
+        return Err(ApiError::missing_credentials(
+            "Anthropic",
+            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        ));
     };
     if !oauth_token_is_expired(&token_set) {
         return Ok(AuthSource::BearerToken(token_set.access_token));
@@ -497,7 +514,10 @@ fn read_api_key() -> Result<String, ApiError> {
     auth.api_key()
         .or_else(|| auth.bearer_token())
         .map(ToOwned::to_owned)
-        .ok_or(ApiError::missing_credentials("Anthropic", &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]))
+        .ok_or(ApiError::missing_credentials(
+            "Anthropic",
+            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        ))
 }
 
 #[cfg(test)]
@@ -518,6 +538,24 @@ fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Strin
         .or_else(|| headers.get(ALT_REQUEST_ID_HEADER))
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
+}
+
+impl Provider for AnthropicClient {
+    type Stream = MessageStream;
+
+    fn send_message<'a>(
+        &'a self,
+        request: &'a MessageRequest,
+    ) -> ProviderFuture<'a, MessageResponse> {
+        Box::pin(async move { self.send_message(request).await })
+    }
+
+    fn stream_message<'a>(
+        &'a self,
+        request: &'a MessageRequest,
+    ) -> ProviderFuture<'a, Self::Stream> {
+        Box::pin(async move { self.stream_message(request).await })
+    }
 }
 
 #[derive(Debug)]
@@ -673,7 +711,10 @@ mod tests {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("CLAUDE_CONFIG_HOME");
         let error = super::read_api_key().expect_err("missing key should error");
-        assert!(matches!(error, crate::error::ApiError::MissingCredentials { .. }));
+        assert!(matches!(
+            error,
+            crate::error::ApiError::MissingCredentials { .. }
+        ));
     }
 
     #[test]
@@ -682,7 +723,10 @@ mod tests {
         std::env::set_var("ANTHROPIC_AUTH_TOKEN", "");
         std::env::remove_var("ANTHROPIC_API_KEY");
         let error = super::read_api_key().expect_err("empty key should error");
-        assert!(matches!(error, crate::error::ApiError::MissingCredentials { .. }));
+        assert!(matches!(
+            error,
+            crate::error::ApiError::MissingCredentials { .. }
+        ));
         std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
     }
 
