@@ -2578,6 +2578,9 @@ mod tests {
             },
         );
         manager.store_registry(&registry).expect("store registry");
+        manager
+            .write_enabled_state("stale@bundled", Some(true))
+            .expect("seed bundled enabled state");
 
         let installed = manager
             .list_installed_plugins()
@@ -2635,6 +2638,9 @@ mod tests {
             },
         );
         manager.store_registry(&registry).expect("store registry");
+        manager
+            .write_enabled_state("stale-external@external", Some(true))
+            .expect("seed stale external enabled state");
 
         let installed = manager
             .list_installed_plugins()
