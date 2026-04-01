@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 const STARTER_CLAUDE_JSON: &str = concat!(
     "{\n",
     "  \"permissions\": {\n",
-    "    \"defaultMode\": \"acceptEdits\"\n",
+    "    \"defaultMode\": \"dontAsk\"\n",
     "  }\n",
     "}\n",
 );
@@ -366,7 +366,7 @@ mod tests {
             concat!(
                 "{\n",
                 "  \"permissions\": {\n",
-                "    \"defaultMode\": \"acceptEdits\"\n",
+                "    \"defaultMode\": \"dontAsk\"\n",
                 "  }\n",
                 "}\n",
             )

@@ -386,13 +386,13 @@ mod tests {
     fn session_state_tracks_config_values() {
         let config = SessionConfig {
             model: "claude".into(),
-            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_mode: PermissionMode::DangerFullAccess,
             config: Some(PathBuf::from("settings.toml")),
             output_format: OutputFormat::Text,
         };
 
         assert_eq!(config.model, "claude");
-        assert_eq!(config.permission_mode, PermissionMode::WorkspaceWrite);
+        assert_eq!(config.permission_mode, PermissionMode::DangerFullAccess);
         assert_eq!(config.config, Some(PathBuf::from("settings.toml")));
     }
 }

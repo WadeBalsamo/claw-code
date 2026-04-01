@@ -78,7 +78,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output_format,
             allowed_tools,
             permission_mode,
-        } => LiveCli::new(model, false, allowed_tools, permission_mode)?
+        } => LiveCli::new(model, true, allowed_tools, permission_mode)?
             .run_turn_with_output(&prompt, output_format)?,
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
@@ -350,7 +350,7 @@ fn default_permission_mode() -> PermissionMode {
         .ok()
         .as_deref()
         .and_then(normalize_permission_mode)
-        .map_or(PermissionMode::WorkspaceWrite, permission_mode_from_label)
+        .map_or(PermissionMode::DangerFullAccess, permission_mode_from_label)
 }
 
 fn filter_tool_specs(allowed_tools: Option<&AllowedToolSet>) -> Vec<tools::ToolSpec> {
@@ -968,6 +968,7 @@ impl LiveCli {
             model.clone(),
             system_prompt.clone(),
             enable_tools,
+            true,
             allowed_tools.clone(),
             permission_mode,
         )?;
@@ -1052,43 +1053,33 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let client = AnthropicClient::from_auth(resolve_cli_auth_source()?)
-            .with_base_url(api::read_base_url());
-        let request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: max_tokens_for_model(&self.model),
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                content: vec![InputContentBlock::Text {
-                    text: input.to_string(),
-                }],
-            }],
-            system: (!self.system_prompt.is_empty()).then(|| self.system_prompt.join("\n\n")),
-            tools: None,
-            tool_choice: None,
-            stream: false,
-        };
-        let runtime = tokio::runtime::Runtime::new()?;
-        let response = runtime.block_on(client.send_message(&request))?;
-        let text = response
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                OutputContentBlock::Text { text } => Some(text.as_str()),
-                OutputContentBlock::ToolUse { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let session = self.runtime.session().clone();
+        let mut runtime = build_runtime(
+            session,
+            self.model.clone(),
+            self.system_prompt.clone(),
+            true,
+            false,
+            self.allowed_tools.clone(),
+            self.permission_mode,
+        )?;
+        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        let summary = runtime.run_turn(input, Some(&mut permission_prompter))?;
+        self.runtime = runtime;
+        self.persist_session()?;
         println!(
             "{}",
             json!({
-                "message": text,
+                "message": final_assistant_text(&summary),
                 "model": self.model,
+                "iterations": summary.iterations,
+                "tool_uses": collect_tool_uses(&summary),
+                "tool_results": collect_tool_results(&summary),
                 "usage": {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                    "input_tokens": summary.usage.input_tokens,
+                    "output_tokens": summary.usage.output_tokens,
+                    "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
                 }
             })
         );
@@ -1214,6 +1205,7 @@ impl LiveCli {
             model.clone(),
             self.system_prompt.clone(),
             true,
+            true,
             self.allowed_tools.clone(),
             self.permission_mode,
         )?;
@@ -1256,6 +1248,7 @@ impl LiveCli {
             self.model.clone(),
             self.system_prompt.clone(),
             true,
+            true,
             self.allowed_tools.clone(),
             self.permission_mode,
         )?;
@@ -1279,6 +1272,7 @@ impl LiveCli {
             Session::new(),
             self.model.clone(),
             self.system_prompt.clone(),
+            true,
             true,
             self.allowed_tools.clone(),
             self.permission_mode,
@@ -1313,6 +1307,7 @@ impl LiveCli {
             session,
             self.model.clone(),
             self.system_prompt.clone(),
+            true,
             true,
             self.allowed_tools.clone(),
             self.permission_mode,
@@ -1385,6 +1380,7 @@ impl LiveCli {
                     self.model.clone(),
                     self.system_prompt.clone(),
                     true,
+                    true,
                     self.allowed_tools.clone(),
                     self.permission_mode,
                 )?;
@@ -1413,6 +1409,7 @@ impl LiveCli {
             result.compacted_session,
             self.model.clone(),
             self.system_prompt.clone(),
+            true,
             true,
             self.allowed_tools.clone(),
             self.permission_mode,
@@ -1881,14 +1878,15 @@ fn build_runtime(
     model: String,
     system_prompt: Vec<String>,
     enable_tools: bool,
+    emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
 ) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
     Ok(ConversationRuntime::new(
         session,
-        AnthropicRuntimeClient::new(model, enable_tools, allowed_tools.clone())?,
-        CliToolExecutor::new(allowed_tools),
+        AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
+        CliToolExecutor::new(allowed_tools, emit_output),
         permission_policy(permission_mode),
         system_prompt,
     ))
@@ -1945,6 +1943,7 @@ struct AnthropicRuntimeClient {
     client: AnthropicClient,
     model: String,
     enable_tools: bool,
+    emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
 }
 
@@ -1952,6 +1951,7 @@ impl AnthropicRuntimeClient {
     fn new(
         model: String,
         enable_tools: bool,
+        emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
@@ -1960,6 +1960,7 @@ impl AnthropicRuntimeClient {
                 .with_base_url(api::read_base_url()),
             model,
             enable_tools,
+            emit_output,
             allowed_tools,
         })
     }
@@ -2004,6 +2005,12 @@ impl ApiClient for AnthropicRuntimeClient {
                 .await
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             let mut stdout = io::stdout();
+            let mut sink = io::sink();
+            let out: &mut dyn Write = if self.emit_output {
+                &mut stdout
+            } else {
+                &mut sink
+            };
             let mut events = Vec::new();
             let mut pending_tool: Option<(String, String, String)> = None;
             let mut saw_stop = false;
@@ -2016,22 +2023,23 @@ impl ApiClient for AnthropicRuntimeClient {
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
                         for block in start.message.content {
-                            push_output_block(block, &mut stdout, &mut events, &mut pending_tool)?;
+                            push_output_block(block, out, &mut events, &mut pending_tool, true)?;
                         }
                     }
                     ApiStreamEvent::ContentBlockStart(start) => {
                         push_output_block(
                             start.content_block,
-                            &mut stdout,
+                            out,
                             &mut events,
                             &mut pending_tool,
+                            true,
                         )?;
                     }
                     ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                         ContentBlockDelta::TextDelta { text } => {
                             if !text.is_empty() {
-                                write!(stdout, "{text}")
-                                    .and_then(|()| stdout.flush())
+                                write!(out, "{text}")
+                                    .and_then(|()| out.flush())
                                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                                 events.push(AssistantEvent::TextDelta(text));
                             }
@@ -2045,13 +2053,9 @@ impl ApiClient for AnthropicRuntimeClient {
                     ApiStreamEvent::ContentBlockStop(_) => {
                         if let Some((id, name, input)) = pending_tool.take() {
                             // Display tool call now that input is fully accumulated
-                            writeln!(
-                                stdout,
-                                "\n{}",
-                                format_tool_call_start(&name, &input)
-                            )
-                            .and_then(|()| stdout.flush())
-                            .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            writeln!(out, "\n{}", format_tool_call_start(&name, &input))
+                                .and_then(|()| out.flush())
+                                .map_err(|error| RuntimeError::new(error.to_string()))?;
                             events.push(AssistantEvent::ToolUse { id, name, input });
                         }
                     }
@@ -2094,9 +2098,65 @@ impl ApiClient for AnthropicRuntimeClient {
                 })
                 .await
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
-            response_to_events(response, &mut stdout)
+            response_to_events(response, out)
         })
     }
+}
+
+fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
+    summary
+        .assistant_messages
+        .last()
+        .map(|message| {
+            message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+fn collect_tool_uses(summary: &runtime::TurnSummary) -> Vec<serde_json::Value> {
+    summary
+        .assistant_messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some(json!({
+                "id": id,
+                "name": name,
+                "input": input,
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_tool_results(summary: &runtime::TurnSummary) -> Vec<serde_json::Value> {
+    summary
+        .tool_results
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                tool_name,
+                output,
+                is_error,
+            } => Some(json!({
+                "tool_use_id": tool_use_id,
+                "tool_name": tool_name,
+                "output": output,
+                "is_error": is_error,
+            })),
+            _ => None,
+        })
+        .collect()
 }
 
 fn slash_command_completion_candidates() -> Vec<String> {
@@ -2131,8 +2191,7 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
             let lines = parsed
                 .get("content")
                 .and_then(|v| v.as_str())
-                .map(|c| c.lines().count())
-                .unwrap_or(0);
+                .map_or(0, |c| c.lines().count());
             format!("{path} ({lines} lines)")
         }
         "edit_file" | "Edit" => {
@@ -2185,13 +2244,6 @@ fn summarize_tool_payload(payload: &str) -> String {
     truncate_for_summary(&compact, 96)
 }
 
-fn prettify_tool_payload(payload: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(payload) {
-        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| payload.to_string()),
-        Err(_) => payload.to_string(),
-    }
-}
-
 fn truncate_for_summary(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
     let truncated = chars.by_ref().take(limit).collect::<String>();
@@ -2204,9 +2256,10 @@ fn truncate_for_summary(value: &str, limit: usize) -> String {
 
 fn push_output_block(
     block: OutputContentBlock,
-    out: &mut impl Write,
+    out: &mut (impl Write + ?Sized),
     events: &mut Vec<AssistantEvent>,
     pending_tool: &mut Option<(String, String, String)>,
+    streaming_tool_input: bool,
 ) -> Result<(), RuntimeError> {
     match block {
         OutputContentBlock::Text { text } => {
@@ -2219,9 +2272,12 @@ fn push_output_block(
         }
         OutputContentBlock::ToolUse { id, name, input } => {
             // During streaming, the initial content_block_start has an empty input ({}).
-            // The real input arrives via input_json_delta events.
-            // Start with empty string so deltas build the correct JSON.
-            let initial_input = if input.is_object() && input.as_object().map_or(false, |o| o.is_empty()) {
+            // The real input arrives via input_json_delta events. In
+            // non-streaming responses, preserve a legitimate empty object.
+            let initial_input = if streaming_tool_input
+                && input.is_object()
+                && input.as_object().is_some_and(serde_json::Map::is_empty)
+            {
                 String::new()
             } else {
                 input.to_string()
@@ -2234,13 +2290,13 @@ fn push_output_block(
 
 fn response_to_events(
     response: MessageResponse,
-    out: &mut impl Write,
+    out: &mut (impl Write + ?Sized),
 ) -> Result<Vec<AssistantEvent>, RuntimeError> {
     let mut events = Vec::new();
     let mut pending_tool = None;
 
     for block in response.content {
-        push_output_block(block, out, &mut events, &mut pending_tool)?;
+        push_output_block(block, out, &mut events, &mut pending_tool, false)?;
         if let Some((id, name, input)) = pending_tool.take() {
             events.push(AssistantEvent::ToolUse { id, name, input });
         }
@@ -2258,13 +2314,15 @@ fn response_to_events(
 
 struct CliToolExecutor {
     renderer: TerminalRenderer,
+    emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
 }
 
 impl CliToolExecutor {
-    fn new(allowed_tools: Option<AllowedToolSet>) -> Self {
+    fn new(allowed_tools: Option<AllowedToolSet>, emit_output: bool) -> Self {
         Self {
             renderer: TerminalRenderer::new(),
+            emit_output,
             allowed_tools,
         }
     }
@@ -2285,17 +2343,21 @@ impl ToolExecutor for CliToolExecutor {
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
         match execute_tool(tool_name, &value) {
             Ok(output) => {
-                let markdown = format_tool_result(tool_name, &output, false);
-                self.renderer
-                    .stream_markdown(&markdown, &mut io::stdout())
-                    .map_err(|error| ToolError::new(error.to_string()))?;
+                if self.emit_output {
+                    let markdown = format_tool_result(tool_name, &output, false);
+                    self.renderer
+                        .stream_markdown(&markdown, &mut io::stdout())
+                        .map_err(|error| ToolError::new(error.to_string()))?;
+                }
                 Ok(output)
             }
             Err(error) => {
-                let markdown = format_tool_result(tool_name, &error, true);
-                self.renderer
-                    .stream_markdown(&markdown, &mut io::stdout())
-                    .map_err(|stream_error| ToolError::new(stream_error.to_string()))?;
+                if self.emit_output {
+                    let markdown = format_tool_result(tool_name, &error, true);
+                    self.renderer
+                        .stream_markdown(&markdown, &mut io::stdout())
+                        .map_err(|stream_error| ToolError::new(stream_error.to_string()))?;
+                }
                 Err(ToolError::new(error))
             }
         }
@@ -2402,7 +2464,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "  --permission-mode MODE     Set read-only, workspace-write, or danger-full-access"
     )?;
-    writeln!(out, "  --dangerously-skip-permissions  Skip all permission checks")?;
+    writeln!(
+        out,
+        "  --dangerously-skip-permissions  Skip all permission checks"
+    )?;
     writeln!(out, "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)")?;
     writeln!(
         out,
@@ -2451,11 +2516,13 @@ mod tests {
         format_model_switch_report, format_permissions_report, format_permissions_switch_report,
         format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
         normalize_permission_mode, parse_args, parse_git_status_metadata, print_help_to,
-        render_config_report, render_memory_report, render_repl_help, resolve_model_alias,
-        resume_supported_slash_commands, status_context, CliAction, CliOutputFormat, SlashCommand,
-        StatusUsage, DEFAULT_MODEL,
+        push_output_block, render_config_report, render_memory_report, render_repl_help,
+        resolve_model_alias, response_to_events, resume_supported_slash_commands, status_context,
+        CliAction, CliOutputFormat, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
-    use runtime::{ContentBlock, ConversationMessage, MessageRole, PermissionMode};
+    use api::{MessageResponse, OutputContentBlock, Usage};
+    use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[test]
@@ -2465,7 +2532,7 @@ mod tests {
             CliAction::Repl {
                 model: DEFAULT_MODEL.to_string(),
                 allowed_tools: None,
-                permission_mode: PermissionMode::WorkspaceWrite,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -2484,7 +2551,7 @@ mod tests {
                 model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::WorkspaceWrite,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -2505,7 +2572,7 @@ mod tests {
                 model: "claude-opus".to_string(),
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
-                permission_mode: PermissionMode::WorkspaceWrite,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -2525,7 +2592,7 @@ mod tests {
                 model: "claude-opus-4-6".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::WorkspaceWrite,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -2534,7 +2601,7 @@ mod tests {
     fn resolves_known_model_aliases() {
         assert_eq!(resolve_model_alias("opus"), "claude-opus-4-6");
         assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-6");
-        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-3-5-20241022");
+        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251213");
         assert_eq!(resolve_model_alias("claude-opus"), "claude-opus");
     }
 
@@ -2580,7 +2647,7 @@ mod tests {
                         .map(str::to_string)
                         .collect()
                 ),
-                permission_mode: PermissionMode::WorkspaceWrite,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -2986,11 +3053,107 @@ mod tests {
     #[test]
     fn tool_rendering_helpers_compact_output() {
         let start = format_tool_call_start("read_file", r#"{"path":"src/main.rs"}"#);
-        assert!(start.contains("Tool call"));
+        assert!(start.contains("read_file"));
         assert!(start.contains("src/main.rs"));
 
         let done = format_tool_result("read_file", r#"{"contents":"hello"}"#, false);
-        assert!(done.contains("Tool `read_file`"));
+        assert!(done.contains("read_file:"));
         assert!(done.contains("contents"));
+    }
+
+    #[test]
+    fn push_output_block_skips_empty_object_prefix_for_tool_streams() {
+        let mut out = Vec::new();
+        let mut events = Vec::new();
+        let mut pending_tool = None;
+
+        push_output_block(
+            OutputContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "read_file".to_string(),
+                input: json!({}),
+            },
+            &mut out,
+            &mut events,
+            &mut pending_tool,
+            true,
+        )
+        .expect("tool block should accumulate");
+
+        assert!(events.is_empty());
+        assert_eq!(
+            pending_tool,
+            Some(("tool-1".to_string(), "read_file".to_string(), String::new(),))
+        );
+    }
+
+    #[test]
+    fn response_to_events_preserves_empty_object_json_input_outside_streaming() {
+        let mut out = Vec::new();
+        let events = response_to_events(
+            MessageResponse {
+                id: "msg-1".to_string(),
+                kind: "message".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                role: "assistant".to_string(),
+                content: vec![OutputContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({}),
+                }],
+                stop_reason: Some("tool_use".to_string()),
+                stop_sequence: None,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+                request_id: None,
+            },
+            &mut out,
+        )
+        .expect("response conversion should succeed");
+
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::ToolUse { name, input, .. }
+                if name == "read_file" && input == "{}"
+        ));
+    }
+
+    #[test]
+    fn response_to_events_preserves_non_empty_json_input_outside_streaming() {
+        let mut out = Vec::new();
+        let events = response_to_events(
+            MessageResponse {
+                id: "msg-2".to_string(),
+                kind: "message".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                role: "assistant".to_string(),
+                content: vec![OutputContentBlock::ToolUse {
+                    id: "tool-2".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({ "path": "rust/Cargo.toml" }),
+                }],
+                stop_reason: Some("tool_use".to_string()),
+                stop_sequence: None,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+                request_id: None,
+            },
+            &mut out,
+        )
+        .expect("response conversion should succeed");
+
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::ToolUse { name, input, .. }
+                if name == "read_file" && input == "{\"path\":\"rust/Cargo.toml\"}"
+        ));
     }
 }

@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(long, default_value = "claude-opus-4-6")]
     pub model: String,
 
-    #[arg(long, value_enum, default_value_t = PermissionMode::WorkspaceWrite)]
+    #[arg(long, value_enum, default_value_t = PermissionMode::DangerFullAccess)]
     pub permission_mode: PermissionMode,
 
     #[arg(long)]
@@ -98,5 +98,11 @@ mod tests {
 
         let logout = Cli::parse_from(["rusty-claude-cli", "logout"]);
         assert_eq!(logout.command, Some(Command::Logout));
+    }
+
+    #[test]
+    fn defaults_to_danger_full_access_permission_mode() {
+        let cli = Cli::parse_from(["rusty-claude-cli"]);
+        assert_eq!(cli.permission_mode, PermissionMode::DangerFullAccess);
     }
 }
