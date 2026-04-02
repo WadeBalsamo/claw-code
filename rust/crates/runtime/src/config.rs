@@ -1021,8 +1021,9 @@ fn push_unique(target: &mut Vec<String>, value: String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigLoader, ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode,
-        CLAW_SETTINGS_SCHEMA_NAME,
+        deep_merge_objects, parse_permission_mode_label, ConfigLoader, ConfigSource,
+        McpServerConfig, McpTransport, ResolvedPermissionMode, RuntimeHookConfig,
+        RuntimePluginConfig, CLAW_SETTINGS_SCHEMA_NAME,
     };
     use crate::json::JsonValue;
     use crate::sandbox::FilesystemIsolationMode;
@@ -1365,6 +1366,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_mcp_server_shapes() {
+        // given
         let root = temp_dir();
         let cwd = root.join("project");
         let home = root.join("home").join(".claw");
@@ -1376,13 +1378,132 @@ mod tests {
         )
         .expect("write broken settings");
 
+        // when
         let error = ConfigLoader::new(&cwd, &home)
             .load()
             .expect_err("config should fail");
+
+        // then
         assert!(error
             .to_string()
             .contains("mcpServers.broken: missing string field url"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn empty_settings_file_loads_defaults() {
+        // given
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".claw");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::write(home.join("settings.json"), "").expect("write empty settings");
+
+        // when
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("empty settings should still load");
+
+        // then
+        assert_eq!(loaded.loaded_entries().len(), 1);
+        assert_eq!(loaded.permission_mode(), None);
+        assert_eq!(loaded.plugins().enabled_plugins().len(), 0);
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn deep_merge_objects_merges_nested_maps() {
+        // given
+        let mut target = JsonValue::parse(r#"{"env":{"A":"1","B":"2"},"model":"haiku"}"#)
+            .expect("target JSON should parse")
+            .as_object()
+            .expect("target should be an object")
+            .clone();
+        let source =
+            JsonValue::parse(r#"{"env":{"B":"override","C":"3"},"sandbox":{"enabled":true}}"#)
+                .expect("source JSON should parse")
+                .as_object()
+                .expect("source should be an object")
+                .clone();
+
+        // when
+        deep_merge_objects(&mut target, &source);
+
+        // then
+        let env = target
+            .get("env")
+            .and_then(JsonValue::as_object)
+            .expect("env should remain an object");
+        assert_eq!(env.get("A"), Some(&JsonValue::String("1".to_string())));
+        assert_eq!(
+            env.get("B"),
+            Some(&JsonValue::String("override".to_string()))
+        );
+        assert_eq!(env.get("C"), Some(&JsonValue::String("3".to_string())));
+        assert!(target.contains_key("sandbox"));
+    }
+
+    #[test]
+    fn permission_mode_aliases_resolve_to_expected_modes() {
+        // given / when / then
+        assert_eq!(
+            parse_permission_mode_label("plan", "test").expect("plan should resolve"),
+            ResolvedPermissionMode::ReadOnly
+        );
+        assert_eq!(
+            parse_permission_mode_label("acceptEdits", "test").expect("acceptEdits should resolve"),
+            ResolvedPermissionMode::WorkspaceWrite
+        );
+        assert_eq!(
+            parse_permission_mode_label("dontAsk", "test").expect("dontAsk should resolve"),
+            ResolvedPermissionMode::DangerFullAccess
+        );
+    }
+
+    #[test]
+    fn hook_config_merge_preserves_uniques() {
+        // given
+        let base = RuntimeHookConfig::new(
+            vec!["pre-a".to_string()],
+            vec!["post-a".to_string()],
+            vec!["failure-a".to_string()],
+        );
+        let overlay = RuntimeHookConfig::new(
+            vec!["pre-a".to_string(), "pre-b".to_string()],
+            vec!["post-a".to_string(), "post-b".to_string()],
+            vec!["failure-b".to_string()],
+        );
+
+        // when
+        let merged = base.merged(&overlay);
+
+        // then
+        assert_eq!(
+            merged.pre_tool_use(),
+            &["pre-a".to_string(), "pre-b".to_string()]
+        );
+        assert_eq!(
+            merged.post_tool_use(),
+            &["post-a".to_string(), "post-b".to_string()]
+        );
+        assert_eq!(
+            merged.post_tool_use_failure(),
+            &["failure-a".to_string(), "failure-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn plugin_state_falls_back_to_default_for_unknown_plugin() {
+        // given
+        let mut config = RuntimePluginConfig::default();
+        config.set_plugin_state("known".to_string(), true);
+
+        // when / then
+        assert!(config.state_for("known", false));
+        assert!(config.state_for("missing", true));
+        assert!(!config.state_for("missing", false));
     }
 }

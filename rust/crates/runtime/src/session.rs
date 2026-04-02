@@ -151,8 +151,9 @@ impl Session {
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
+        let snapshot = self.render_jsonl_snapshot()?;
         rotate_session_file_if_needed(path)?;
-        write_atomic(path, &self.render_jsonl_snapshot()?)?;
+        write_atomic(path, &snapshot)?;
         cleanup_rotated_logs(path)?;
         Ok(())
     }
@@ -221,7 +222,6 @@ impl Session {
         }
     }
 
-    #[must_use]
     pub fn to_json(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
@@ -640,7 +640,6 @@ impl ContentBlock {
 }
 
 impl SessionCompaction {
-    #[must_use]
     pub fn to_json(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
@@ -661,7 +660,6 @@ impl SessionCompaction {
         Ok(JsonValue::Object(object))
     }
 
-    #[must_use]
     pub fn to_jsonl_record(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
@@ -1082,11 +1080,16 @@ mod tests {
 
     #[test]
     fn rotates_and_cleans_up_large_session_logs() {
+        // given
         let path = temp_session_path("rotation");
         let oversized_length =
             usize::try_from(super::ROTATE_AFTER_BYTES + 10).expect("rotate threshold should fit");
         fs::write(&path, "x".repeat(oversized_length)).expect("oversized file should write");
+
+        // when
         rotate_session_file_if_needed(&path).expect("rotation should succeed");
+
+        // then
         assert!(
             !path.exists(),
             "original path should be rotated away before rewrite"
@@ -1105,12 +1108,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rejects_jsonl_record_without_type() {
+        // given
+        let path = write_temp_session_file(
+            "missing-type",
+            r#"{"message":{"role":"user","blocks":[{"type":"text","text":"hello"}]}}"#,
+        );
+
+        // when
+        let error = Session::load_from_path(&path)
+            .expect_err("session should reject JSONL records without a type");
+
+        // then
+        assert!(error.to_string().contains("missing type"));
+        fs::remove_file(path).expect("temp file should be removable");
+    }
+
+    #[test]
+    fn rejects_jsonl_message_record_without_message_payload() {
+        // given
+        let path = write_temp_session_file("missing-message", r#"{"type":"message"}"#);
+
+        // when
+        let error = Session::load_from_path(&path)
+            .expect_err("session should reject JSONL message records without message payload");
+
+        // then
+        assert!(error.to_string().contains("missing message"));
+        fs::remove_file(path).expect("temp file should be removable");
+    }
+
+    #[test]
+    fn rejects_jsonl_record_with_unknown_type() {
+        // given
+        let path = write_temp_session_file("unknown-type", r#"{"type":"mystery"}"#);
+
+        // when
+        let error = Session::load_from_path(&path)
+            .expect_err("session should reject unknown JSONL record types");
+
+        // then
+        assert!(error.to_string().contains("unsupported JSONL record type"));
+        fs::remove_file(path).expect("temp file should be removable");
+    }
+
+    #[test]
+    fn rejects_legacy_session_json_without_messages() {
+        // given
+        let session = JsonValue::Object(
+            [("version".to_string(), JsonValue::Number(1))]
+                .into_iter()
+                .collect(),
+        );
+
+        // when
+        let error = Session::from_json(&session)
+            .expect_err("legacy session objects should require messages");
+
+        // then
+        assert!(error.to_string().contains("missing messages"));
+    }
+
+    #[test]
+    fn normalizes_blank_fork_branch_name_to_none() {
+        // given
+        let session = Session::new();
+
+        // when
+        let forked = session.fork(Some("   ".to_string()));
+
+        // then
+        assert_eq!(forked.fork.expect("fork metadata").branch_name, None);
+    }
+
+    #[test]
+    fn rejects_unknown_content_block_type() {
+        // given
+        let block = JsonValue::Object(
+            [("type".to_string(), JsonValue::String("unknown".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+
+        // when
+        let error = ContentBlock::from_json(&block)
+            .expect_err("content blocks should reject unknown types");
+
+        // then
+        assert!(error.to_string().contains("unsupported block type"));
+    }
+
     fn temp_session_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("runtime-session-{label}-{nanos}.json"))
+    }
+
+    fn write_temp_session_file(label: &str, contents: &str) -> PathBuf {
+        let path = temp_session_path(label);
+        fs::write(&path, format!("{contents}\n")).expect("temp session file should write");
+        path
     }
 
     fn rotation_files(path: &Path) -> Vec<PathBuf> {

@@ -760,9 +760,9 @@ impl ToolExecutor for StaticToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_auto_compaction_threshold, ApiClient, ApiRequest, AssistantEvent,
-        AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
-        StaticToolExecutor, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+        build_assistant_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
+        AssistantEvent, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
+        StaticToolExecutor, ToolExecutor, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -1388,14 +1388,135 @@ mod tests {
 
     #[test]
     fn auto_compaction_threshold_defaults_and_parses_values() {
+        // given / when / then
         assert_eq!(
             parse_auto_compaction_threshold(None),
             DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
         );
         assert_eq!(parse_auto_compaction_threshold(Some("4321")), 4321);
         assert_eq!(
+            parse_auto_compaction_threshold(Some("0")),
+            DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
+        );
+        assert_eq!(
             parse_auto_compaction_threshold(Some("not-a-number")),
             DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
         );
+    }
+
+    #[test]
+    fn build_assistant_message_requires_message_stop_event() {
+        // given
+        let events = vec![AssistantEvent::TextDelta("hello".to_string())];
+
+        // when
+        let error = build_assistant_message(events)
+            .expect_err("assistant messages should require a stop event");
+
+        // then
+        assert!(error
+            .to_string()
+            .contains("assistant stream ended without a message stop event"));
+    }
+
+    #[test]
+    fn build_assistant_message_requires_content() {
+        // given
+        let events = vec![AssistantEvent::MessageStop];
+
+        // when
+        let error =
+            build_assistant_message(events).expect_err("assistant messages should require content");
+
+        // then
+        assert!(error
+            .to_string()
+            .contains("assistant stream produced no content"));
+    }
+
+    #[test]
+    fn static_tool_executor_rejects_unknown_tools() {
+        // given
+        let mut executor = StaticToolExecutor::new();
+
+        // when
+        let error = executor
+            .execute("missing", "{}")
+            .expect_err("unregistered tools should fail");
+
+        // then
+        assert_eq!(error.to_string(), "unknown tool: missing");
+    }
+
+    #[test]
+    fn run_turn_errors_when_max_iterations_is_exceeded() {
+        struct LoopingApi;
+
+        impl ApiClient for LoopingApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "echo".to_string(),
+                        input: "payload".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        // given
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            LoopingApi,
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_max_iterations(1);
+
+        // when
+        let error = runtime
+            .run_turn("loop", None)
+            .expect_err("conversation loop should stop after the configured limit");
+
+        // then
+        assert!(error
+            .to_string()
+            .contains("conversation loop exceeded the maximum number of iterations"));
+    }
+
+    #[test]
+    fn run_turn_propagates_api_errors() {
+        struct FailingApi;
+
+        impl ApiClient for FailingApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Err(RuntimeError::new("upstream failed"))
+            }
+        }
+
+        // given
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            FailingApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        // when
+        let error = runtime
+            .run_turn("hello", None)
+            .expect_err("API failures should propagate");
+
+        // then
+        assert_eq!(error.to_string(), "upstream failed");
     }
 }

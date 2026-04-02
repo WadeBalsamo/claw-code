@@ -15,6 +15,7 @@ mod prompt;
 mod remote;
 pub mod sandbox;
 mod session;
+mod sse;
 mod usage;
 
 pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
@@ -90,6 +91,7 @@ pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction, SessionError,
     SessionFork,
 };
+pub use sse::{IncrementalSseParser, SseEvent};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };
