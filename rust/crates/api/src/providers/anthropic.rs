@@ -322,7 +322,10 @@ impl AnthropicClient {
                     .with_property(
                         "estimated_cost_usd",
                         Value::String(format_usd(
-                            response.usage.estimated_cost_usd(&response.model).total_cost_usd(),
+                            response
+                                .usage
+                                .estimated_cost_usd(&response.model)
+                                .total_cost_usd(),
                         )),
                     ),
             );
