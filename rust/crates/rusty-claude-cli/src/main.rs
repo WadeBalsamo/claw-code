@@ -104,6 +104,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session_path,
             commands,
         } => resume_session(&session_path, &commands),
+        CliAction::Status {
+            model,
+            permission_mode,
+        } => print_status_snapshot(&model, permission_mode)?,
+        CliAction::Sandbox => print_sandbox_status_snapshot()?,
         CliAction::Prompt {
             prompt,
             model,
@@ -144,6 +149,11 @@ enum CliAction {
         session_path: PathBuf,
         commands: Vec<String>,
     },
+    Status {
+        model: String,
+        permission_mode: PermissionMode,
+    },
+    Sandbox,
     Prompt {
         prompt: String,
         model: String,
@@ -312,6 +322,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     if rest.first().map(String::as_str) == Some("--resume") {
         return parse_resume_args(&rest[1..]);
     }
+    if let Some(action) = parse_single_word_command_alias(&rest, &model, permission_mode) {
+        return action;
+    }
 
     match rest[0].as_str() {
         "dump-manifests" => Ok(CliAction::DumpManifests),
@@ -348,6 +361,57 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             permission_mode,
         }),
     }
+}
+
+fn parse_single_word_command_alias(
+    rest: &[String],
+    model: &str,
+    permission_mode: PermissionMode,
+) -> Option<Result<CliAction, String>> {
+    if rest.len() != 1 {
+        return None;
+    }
+
+    match rest[0].as_str() {
+        "help" => Some(Ok(CliAction::Help)),
+        "version" => Some(Ok(CliAction::Version)),
+        "status" => Some(Ok(CliAction::Status {
+            model: model.to_string(),
+            permission_mode,
+        })),
+        "sandbox" => Some(Ok(CliAction::Sandbox)),
+        other => bare_slash_command_guidance(other).map(Err),
+    }
+}
+
+fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
+    if matches!(
+        command_name,
+        "dump-manifests"
+            | "bootstrap-plan"
+            | "agents"
+            | "skills"
+            | "system-prompt"
+            | "login"
+            | "logout"
+            | "init"
+            | "prompt"
+    ) {
+        return None;
+    }
+    let slash_command = slash_command_specs()
+        .into_iter()
+        .find(|spec| spec.name == command_name)?;
+    let guidance = if slash_command.resume_supported {
+        format!(
+            "`claw {command_name}` is a slash command. Use `claw --resume SESSION.jsonl /{command_name}` or start `claw` and run `/{command_name}`."
+        )
+    } else {
+        format!(
+            "`claw {command_name}` is a slash command. Start `claw` and run `/{command_name}` inside the REPL."
+        )
+    };
+    Some(guidance)
 }
 
 fn join_optional_args(args: &[String]) -> Option<String> {
@@ -2550,6 +2614,28 @@ fn render_repl_help() -> String {
     )
 }
 
+fn print_status_snapshot(
+    model: &str,
+    permission_mode: PermissionMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "{}",
+        format_status_report(
+            model,
+            StatusUsage {
+                message_count: 0,
+                turns: 0,
+                latest: TokenUsage::default(),
+                cumulative: TokenUsage::default(),
+                estimated_tokens: 0,
+            },
+            permission_mode.as_str(),
+            &status_context(None)?,
+        )
+    );
+    Ok(())
+}
+
 fn status_context(
     session_path: Option<&Path>,
 ) -> Result<StatusContext, Box<dyn std::error::Error>> {
@@ -2749,6 +2835,19 @@ fn format_git_commit_failure(stderr: &str) -> String {
     } else {
         format!("git commit failed: {stderr}")
     }
+}
+
+fn print_sandbox_status_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let runtime_config = loader
+        .load()
+        .unwrap_or_else(|_| runtime::RuntimeConfig::empty());
+    println!(
+        "{}",
+        format_sandbox_report(&resolve_sandbox_status(runtime_config.sandbox(), &cwd))
+    );
+    Ok(())
 }
 
 fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
@@ -4710,6 +4809,17 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "      Inspect or maintain a saved session without entering the REPL"
     )?;
+    writeln!(out, "  claw help")?;
+    writeln!(out, "      Alias for --help")?;
+    writeln!(out, "  claw version")?;
+    writeln!(out, "      Alias for --version")?;
+    writeln!(out, "  claw status")?;
+    writeln!(
+        out,
+        "      Show the current local workspace status snapshot"
+    )?;
+    writeln!(out, "  claw sandbox")?;
+    writeln!(out, "      Show the current sandbox isolation snapshot")?;
     writeln!(out, "  claw dump-manifests")?;
     writeln!(out, "  claw bootstrap-plan")?;
     writeln!(out, "  claw agents")?;
@@ -5070,6 +5180,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_single_word_command_aliases_without_falling_back_to_prompt_mode() {
+        assert_eq!(
+            parse_args(&["help".to_string()]).expect("help should parse"),
+            CliAction::Help
+        );
+        assert_eq!(
+            parse_args(&["version".to_string()]).expect("version should parse"),
+            CliAction::Version
+        );
+        assert_eq!(
+            parse_args(&["status".to_string()]).expect("status should parse"),
+            CliAction::Status {
+                model: DEFAULT_MODEL.to_string(),
+                permission_mode: PermissionMode::DangerFullAccess,
+            }
+        );
+        assert_eq!(
+            parse_args(&["sandbox".to_string()]).expect("sandbox should parse"),
+            CliAction::Sandbox
+        );
+    }
+
+    #[test]
+    fn single_word_slash_command_names_return_guidance_instead_of_hitting_prompt_mode() {
+        let error = parse_args(&["cost".to_string()]).expect_err("cost should return guidance");
+        assert!(error.contains("slash command"));
+        assert!(error.contains("/cost"));
+    }
+
+    #[test]
+    fn multi_word_prompt_still_uses_shorthand_prompt_mode() {
+        assert_eq!(
+            parse_args(&["help".to_string(), "me".to_string(), "debug".to_string()])
+                .expect("prompt shorthand should still work"),
+            CliAction::Prompt {
+                prompt: "help me debug".to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                output_format: CliOutputFormat::Text,
+                allowed_tools: None,
+                permission_mode: PermissionMode::DangerFullAccess,
+            }
+        );
+    }
+
+    #[test]
     fn parses_direct_agents_and_skills_slash_commands() {
         assert_eq!(
             parse_args(&["/agents".to_string()]).expect("/agents should parse"),
@@ -5395,6 +5550,10 @@ mod tests {
         let mut help = Vec::new();
         print_help_to(&mut help).expect("help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
+        assert!(help.contains("claw help"));
+        assert!(help.contains("claw version"));
+        assert!(help.contains("claw status"));
+        assert!(help.contains("claw sandbox"));
         assert!(help.contains("claw init"));
         assert!(help.contains("claw agents"));
         assert!(help.contains("claw skills"));
