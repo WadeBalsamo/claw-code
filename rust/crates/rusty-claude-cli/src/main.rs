@@ -425,17 +425,63 @@ fn parse_resume_args(args: &[String]) -> Result<CliAction, String> {
         .first()
         .ok_or_else(|| "missing session path for --resume".to_string())
         .map(PathBuf::from)?;
-    let commands = args[1..].to_vec();
-    if commands
-        .iter()
-        .any(|command| !command.trim_start().starts_with('/'))
-    {
-        return Err("--resume trailing arguments must be slash commands".to_string());
+    let mut commands = Vec::new();
+    let mut current_command = String::new();
+
+    for token in &args[1..] {
+        if token.trim_start().starts_with('/') {
+            if resume_command_can_absorb_token(&current_command, token) {
+                current_command.push(' ');
+                current_command.push_str(token);
+                continue;
+            }
+            if !current_command.is_empty() {
+                commands.push(current_command);
+            }
+            current_command = token.clone();
+            continue;
+        }
+
+        if current_command.is_empty() {
+            return Err("--resume trailing arguments must be slash commands".to_string());
+        }
+
+        current_command.push(' ');
+        current_command.push_str(token);
     }
+
+    if !current_command.is_empty() {
+        commands.push(current_command);
+    }
+
     Ok(CliAction::ResumeSession {
         session_path,
         commands,
     })
+}
+
+fn resume_command_can_absorb_token(current_command: &str, token: &str) -> bool {
+    matches!(
+        SlashCommand::parse(current_command),
+        Some(SlashCommand::Export { path: None })
+    ) && !looks_like_slash_command_token(token)
+}
+
+fn looks_like_slash_command_token(token: &str) -> bool {
+    let trimmed = token.trim_start();
+    let Some(name) = trimmed.strip_prefix('/').and_then(|value| {
+        value
+            .split_whitespace()
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }) else {
+        return false;
+    };
+
+    slash_command_specs()
+        .iter()
+        .any(|spec| spec.name == name || spec.aliases.contains(&name))
 }
 
 fn dump_manifests() {
@@ -3286,7 +3332,6 @@ impl AnthropicRuntimeClient {
             progress_reporter,
         })
     }
-
 }
 
 fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
@@ -4569,6 +4614,46 @@ mod tests {
                     "/compact".to_string(),
                     "/cost".to_string(),
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_resume_flag_with_slash_command_arguments() {
+        let args = vec![
+            "--resume".to_string(),
+            "session.jsonl".to_string(),
+            "/export".to_string(),
+            "notes.txt".to_string(),
+            "/clear".to_string(),
+            "--confirm".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).expect("args should parse"),
+            CliAction::ResumeSession {
+                session_path: PathBuf::from("session.jsonl"),
+                commands: vec![
+                    "/export notes.txt".to_string(),
+                    "/clear --confirm".to_string()
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_resume_flag_with_absolute_export_path() {
+        let args = vec![
+            "--resume".to_string(),
+            "session.jsonl".to_string(),
+            "/export".to_string(),
+            "/tmp/notes.txt".to_string(),
+            "/status".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).expect("args should parse"),
+            CliAction::ResumeSession {
+                session_path: PathBuf::from("session.jsonl"),
+                commands: vec!["/export /tmp/notes.txt".to_string(), "/status".to_string()],
             }
         );
     }
