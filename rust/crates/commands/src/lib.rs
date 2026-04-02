@@ -587,7 +587,7 @@ fn parse_mcp_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParseErr
             "mcp",
             "/mcp show <server>",
         )),
-        ["help"] | ["-h"] | ["--help"] => Ok(SlashCommand::Mcp {
+        ["help" | "-h" | "--help"] => Ok(SlashCommand::Mcp {
             action: Some("help".to_string()),
             target: None,
         }),

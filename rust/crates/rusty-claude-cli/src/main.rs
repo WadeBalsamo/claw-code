@@ -1864,6 +1864,7 @@ impl LiveCli {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_repl_command(
         &mut self,
         command: SlashCommand,
@@ -3463,7 +3464,7 @@ fn build_runtime_plugin_state_with_loader(
     loader: &ConfigLoader,
     runtime_config: &runtime::RuntimeConfig,
 ) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
-    let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+    let plugin_manager = build_plugin_manager(cwd, loader, runtime_config);
     let plugin_registry = plugin_manager.plugin_registry()?;
     let plugin_hook_config =
         runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);

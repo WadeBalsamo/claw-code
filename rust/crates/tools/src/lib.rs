@@ -1014,6 +1014,7 @@ struct PlanModeState {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct PlanModeOutput {
     success: bool,
     operation: String,

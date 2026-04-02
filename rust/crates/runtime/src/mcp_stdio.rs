@@ -437,30 +437,31 @@ impl McpServerManager {
 
         self.ensure_server_ready(&route.server_name).await?;
         let request_id = self.take_request_id();
-        let response = {
-            let server = self.server_mut(&route.server_name)?;
-            let process = server.process.as_mut().ok_or_else(|| {
-                McpServerManagerError::InvalidResponse {
-                    server_name: route.server_name.clone(),
-                    method: "tools/call",
-                    details: "server process missing after initialization".to_string(),
-                }
-            })?;
-            Self::run_process_request(
-                &route.server_name,
-                "tools/call",
-                timeout_ms,
-                process.call_tool(
-                    request_id,
-                    McpToolCallParams {
-                        name: route.raw_name,
-                        arguments,
-                        meta: None,
-                    },
-                ),
-            )
-            .await
-        };
+        let response =
+            {
+                let server = self.server_mut(&route.server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: route.server_name.clone(),
+                        method: "tools/call",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                Self::run_process_request(
+                    &route.server_name,
+                    "tools/call",
+                    timeout_ms,
+                    process.call_tool(
+                        request_id,
+                        McpToolCallParams {
+                            name: route.raw_name,
+                            arguments,
+                            meta: None,
+                        },
+                    ),
+                )
+                .await
+            };
 
         if let Err(error) = &response {
             if Self::should_reset_server(error) {
@@ -507,12 +508,12 @@ impl McpServerManager {
     }
 
     fn tool_call_timeout_ms(&self, server_name: &str) -> Result<u64, McpServerManagerError> {
-        let server = self
-            .servers
-            .get(server_name)
-            .ok_or_else(|| McpServerManagerError::UnknownServer {
-                server_name: server_name.to_string(),
-            })?;
+        let server =
+            self.servers
+                .get(server_name)
+                .ok_or_else(|| McpServerManagerError::UnknownServer {
+                    server_name: server_name.to_string(),
+                })?;
         match &server.bootstrap.transport {
             McpClientTransport::Stdio(transport) => Ok(transport.resolved_tool_call_timeout_ms()),
             other => Err(McpServerManagerError::InvalidResponse {
@@ -595,14 +596,13 @@ impl McpServerManager {
                 });
             }
 
-            let result =
-                response
-                    .result
-                    .ok_or_else(|| McpServerManagerError::InvalidResponse {
-                        server_name: server_name.to_string(),
-                        method: "tools/list",
-                        details: "missing result payload".to_string(),
-                    })?;
+            let result = response
+                .result
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method: "tools/list",
+                    details: "missing result payload".to_string(),
+                })?;
 
             for tool in result.tools {
                 let qualified_name = mcp_tool_name(server_name, &tool.name);
@@ -1614,10 +1614,7 @@ mod tests {
             let script_path = write_jsonrpc_script();
             let transport = script_transport_with_env(
                 &script_path,
-                BTreeMap::from([(
-                    "MCP_LOWERCASE_CONTENT_LENGTH".to_string(),
-                    "1".to_string(),
-                )]),
+                BTreeMap::from([("MCP_LOWERCASE_CONTENT_LENGTH".to_string(), "1".to_string())]),
             );
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
 
@@ -1657,10 +1654,7 @@ mod tests {
             let script_path = write_jsonrpc_script();
             let transport = script_transport_with_env(
                 &script_path,
-                BTreeMap::from([(
-                    "MCP_MISMATCHED_RESPONSE_ID".to_string(),
-                    "1".to_string(),
-                )]),
+                BTreeMap::from([("MCP_MISMATCHED_RESPONSE_ID".to_string(), "1".to_string())]),
             );
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
 
@@ -1971,7 +1965,10 @@ mod tests {
 
             manager.discover_tools().await.expect("discover tools");
             let error = manager
-                .call_tool(&mcp_tool_name("slow", "echo"), Some(json!({"text": "slow"})))
+                .call_tool(
+                    &mcp_tool_name("slow", "echo"),
+                    Some(json!({"text": "slow"})),
+                )
                 .await
                 .expect_err("slow tool call should time out");
 
@@ -2036,7 +2033,9 @@ mod tests {
                 } => {
                     assert_eq!(server_name, "broken");
                     assert_eq!(method, "tools/call");
-                    assert!(details.contains("expected ident") || details.contains("expected value"));
+                    assert!(
+                        details.contains("expected ident") || details.contains("expected value")
+                    );
                 }
                 other => panic!("expected invalid response error, got {other:?}"),
             }
@@ -2047,7 +2046,8 @@ mod tests {
     }
 
     #[test]
-    fn given_child_exits_after_discovery_when_calling_twice_then_second_call_succeeds_after_reset() {
+    fn given_child_exits_after_discovery_when_calling_twice_then_second_call_succeeds_after_reset()
+    {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2062,10 +2062,7 @@ mod tests {
                     &script_path,
                     "alpha",
                     &log_path,
-                    BTreeMap::from([(
-                        "MCP_EXIT_AFTER_TOOLS_LIST".to_string(),
-                        "1".to_string(),
-                    )]),
+                    BTreeMap::from([("MCP_EXIT_AFTER_TOOLS_LIST".to_string(), "1".to_string())]),
                 ),
             )]);
             let mut manager = McpServerManager::from_servers(&servers);
@@ -2150,7 +2147,10 @@ mod tests {
             )]);
             let mut manager = McpServerManager::from_servers(&servers);
 
-            let tools = manager.discover_tools().await.expect("discover tools after retry");
+            let tools = manager
+                .discover_tools()
+                .await
+                .expect("discover tools after retry");
 
             assert_eq!(tools.len(), 1);
             assert_eq!(tools[0].qualified_name, mcp_tool_name("alpha", "echo"));
@@ -2166,7 +2166,8 @@ mod tests {
     }
 
     #[test]
-    fn given_tool_call_disconnects_once_when_calling_twice_then_manager_resets_and_next_call_succeeds() {
+    fn given_tool_call_disconnects_once_when_calling_twice_then_manager_resets_and_next_call_succeeds(
+    ) {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2198,7 +2199,10 @@ mod tests {
 
             manager.discover_tools().await.expect("discover tools");
             let first_error = manager
-                .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "first"})))
+                .call_tool(
+                    &mcp_tool_name("alpha", "echo"),
+                    Some(json!({"text": "first"})),
+                )
                 .await
                 .expect_err("first tool call should fail when transport drops");
 
@@ -2216,7 +2220,10 @@ mod tests {
             }
 
             let response = manager
-                .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "second"})))
+                .call_tool(
+                    &mcp_tool_name("alpha", "echo"),
+                    Some(json!({"text": "second"})),
+                )
                 .await
                 .expect("second tool call should succeed after reset");
 
