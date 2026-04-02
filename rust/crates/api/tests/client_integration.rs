@@ -4,9 +4,10 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use api::{
-    ApiClient, ApiError, AuthSource, ContentBlockDelta, ContentBlockDeltaEvent,
+    AnthropicClient, ApiClient, ApiError, AuthSource, ContentBlockDelta, ContentBlockDeltaEvent,
     ContentBlockStartEvent, InputContentBlock, InputMessage, MessageDeltaEvent, MessageRequest,
-    OutputContentBlock, ProviderClient, StreamEvent, ToolChoice, ToolDefinition,
+    OutputContentBlock, PromptCache, PromptCacheConfig, ProviderClient, StreamEvent, ToolChoice,
+    ToolDefinition,
 };
 use serde_json::json;
 use telemetry::{ClientIdentity, MemoryTelemetrySink, SessionTracer, TelemetryEvent};
@@ -562,10 +563,10 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
     let request = sample_request(false);
     let client = AnthropicClient::new("test-key")
         .with_base_url(server.base_url())
-        .with_prompt_cache(PromptCache::with_config(api::PromptCacheConfig {
+        .with_prompt_cache(PromptCache::with_config(PromptCacheConfig {
             session_id: "break-session".to_string(),
             completion_ttl: Duration::from_secs(0),
-            ..api::PromptCacheConfig::default()
+            ..PromptCacheConfig::default()
         }));
 
     client
