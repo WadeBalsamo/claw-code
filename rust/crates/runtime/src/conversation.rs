@@ -374,6 +374,13 @@ where
                             &format!("PreToolUse hook cancelled tool `{tool_name}`"),
                         ),
                     }
+                } else if pre_hook_result.is_failed() {
+                    PermissionOutcome::Deny {
+                        reason: format_hook_message(
+                            &pre_hook_result,
+                            &format!("PreToolUse hook failed for tool `{tool_name}`"),
+                        ),
+                    }
                 } else if pre_hook_result.is_denied() {
                     PermissionOutcome::Deny {
                         reason: format_hook_message(
@@ -421,13 +428,18 @@ where
                                 false,
                             )
                         };
-                        if post_hook_result.is_denied() || post_hook_result.is_cancelled() {
+                        if post_hook_result.is_denied()
+                            || post_hook_result.is_failed()
+                            || post_hook_result.is_cancelled()
+                        {
                             is_error = true;
                         }
                         output = merge_hook_feedback(
                             post_hook_result.messages(),
                             output,
-                            post_hook_result.is_denied() || post_hook_result.is_cancelled(),
+                            post_hook_result.is_denied()
+                                || post_hook_result.is_failed()
+                                || post_hook_result.is_cancelled(),
                         );
 
                         ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
@@ -707,7 +719,7 @@ fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
     }
 }
 
-fn merge_hook_feedback(messages: &[String], output: String, denied: bool) -> String {
+fn merge_hook_feedback(messages: &[String], output: String, is_error: bool) -> String {
     if messages.is_empty() {
         return output;
     }
@@ -716,8 +728,8 @@ fn merge_hook_feedback(messages: &[String], output: String, denied: bool) -> Str
     if !output.trim().is_empty() {
         sections.push(output);
     }
-    let label = if denied {
-        "Hook feedback (denied)"
+    let label = if is_error {
+        "Hook feedback (error)"
     } else {
         "Hook feedback"
     };
@@ -1047,6 +1059,71 @@ mod tests {
         assert!(
             output.contains("denied tool") || output.contains("blocked by hook"),
             "unexpected hook denial output: {output:?}"
+        );
+    }
+
+    #[test]
+    fn denies_tool_use_when_pre_tool_hook_fails() {
+        struct SingleCallApiClient;
+        impl ApiClient for SingleCallApiClient {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if request
+                    .messages
+                    .iter()
+                    .any(|message| message.role == MessageRole::Tool)
+                {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta("failed".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "blocked".to_string(),
+                        input: r#"{"path":"secret.txt"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        // given
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            SingleCallApiClient,
+            StaticToolExecutor::new().register("blocked", |_input| {
+                panic!("tool should not execute when hook fails")
+            }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+            &RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
+                vec![shell_snippet("printf 'broken hook'; exit 1")],
+                Vec::new(),
+                Vec::new(),
+            )),
+        );
+
+        // when
+        let summary = runtime
+            .run_turn("use the tool", None)
+            .expect("conversation should continue after hook failure");
+
+        // then
+        assert_eq!(summary.tool_results.len(), 1);
+        let ContentBlock::ToolResult {
+            is_error, output, ..
+        } = &summary.tool_results[0].blocks[0]
+        else {
+            panic!("expected tool result block");
+        };
+        assert!(
+            *is_error,
+            "hook failure should produce an error result: {output}"
+        );
+        assert!(
+            output.contains("exited with status 1") || output.contains("broken hook"),
+            "unexpected hook failure output: {output:?}"
         );
     }
 

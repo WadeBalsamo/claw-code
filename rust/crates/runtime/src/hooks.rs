@@ -80,6 +80,7 @@ impl HookAbortSignal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRunResult {
     denied: bool,
+    failed: bool,
     cancelled: bool,
     messages: Vec<String>,
     permission_override: Option<PermissionOverride>,
@@ -92,6 +93,7 @@ impl HookRunResult {
     pub fn allow(messages: Vec<String>) -> Self {
         Self {
             denied: false,
+            failed: false,
             cancelled: false,
             messages,
             permission_override: None,
@@ -103,6 +105,11 @@ impl HookRunResult {
     #[must_use]
     pub fn is_denied(&self) -> bool {
         self.denied
+    }
+
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        self.failed
     }
 
     #[must_use]
@@ -317,6 +324,7 @@ impl HookRunner {
         if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
             return HookRunResult {
                 denied: false,
+                failed: false,
                 cancelled: true,
                 messages: vec![format!(
                     "{} hook cancelled before execution",
@@ -372,7 +380,7 @@ impl HookRunner {
                     result.denied = true;
                     return result;
                 }
-                HookCommandOutcome::Warn { message } => {
+                HookCommandOutcome::Failed { parsed } => {
                     if let Some(reporter) = reporter.as_deref_mut() {
                         reporter.on_event(&HookProgressEvent::Completed {
                             event,
@@ -380,7 +388,9 @@ impl HookRunner {
                             command: command.clone(),
                         });
                     }
-                    result.messages.push(message);
+                    merge_parsed_hook_output(&mut result, parsed);
+                    result.failed = true;
+                    return result;
                 }
                 HookCommandOutcome::Cancelled { message } => {
                     if let Some(reporter) = reporter.as_deref_mut() {
@@ -428,6 +438,7 @@ impl HookRunner {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 let parsed = parse_hook_output(&stdout);
+                let primary_message = parsed.primary_message().map(ToOwned::to_owned);
                 match output.status.code() {
                     Some(0) => {
                         if parsed.deny {
@@ -442,20 +453,20 @@ impl HookRunner {
                             event.as_str()
                         )),
                     },
-                    Some(code) => HookCommandOutcome::Warn {
-                        message: format_hook_warning(
+                    Some(code) => HookCommandOutcome::Failed {
+                        parsed: parsed.with_fallback_message(format_hook_failure(
                             command,
                             code,
-                            parsed.primary_message(),
+                            primary_message.as_deref(),
                             stderr.as_str(),
-                        ),
+                        )),
                     },
-                    None => HookCommandOutcome::Warn {
-                        message: format!(
+                    None => HookCommandOutcome::Failed {
+                        parsed: parsed.with_fallback_message(format!(
                             "{} hook `{command}` terminated by signal while handling `{}`",
                             event.as_str(),
                             tool_name
-                        ),
+                        )),
                     },
                 }
             }
@@ -465,12 +476,15 @@ impl HookRunner {
                     event.as_str()
                 ),
             },
-            Err(error) => HookCommandOutcome::Warn {
-                message: format!(
-                    "{} hook `{command}` failed to start for `{}`: {error}",
-                    event.as_str(),
-                    tool_name
-                ),
+            Err(error) => HookCommandOutcome::Failed {
+                parsed: ParsedHookOutput {
+                    messages: vec![format!(
+                        "{} hook `{command}` failed to start for `{}`: {error}",
+                        event.as_str(),
+                        tool_name
+                    )],
+                    ..ParsedHookOutput::default()
+                },
             },
         }
     }
@@ -479,7 +493,7 @@ impl HookRunner {
 enum HookCommandOutcome {
     Allow { parsed: ParsedHookOutput },
     Deny { parsed: ParsedHookOutput },
-    Warn { message: String },
+    Failed { parsed: ParsedHookOutput },
     Cancelled { message: String },
 }
 
@@ -605,9 +619,8 @@ fn parse_tool_input(tool_input: &str) -> Value {
     serde_json::from_str(tool_input).unwrap_or_else(|_| json!({ "raw": tool_input }))
 }
 
-fn format_hook_warning(command: &str, code: i32, stdout: Option<&str>, stderr: &str) -> String {
-    let mut message =
-        format!("Hook `{command}` exited with status {code}; allowing tool execution to continue");
+fn format_hook_failure(command: &str, code: i32, stdout: Option<&str>, stderr: &str) -> String {
+    let mut message = format!("Hook `{command}` exited with status {code}");
     if let Some(stdout) = stdout.filter(|stdout| !stdout.is_empty()) {
         message.push_str(": ");
         message.push_str(stdout);
@@ -749,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn warns_for_other_non_zero_statuses() {
+    fn propagates_other_non_zero_statuses_as_failures() {
         let runner = HookRunner::from_feature_config(&RuntimeFeatureConfig::default().with_hooks(
             RuntimeHookConfig::new(
                 vec![shell_snippet("printf 'warning hook'; exit 1")],
@@ -758,13 +771,16 @@ mod tests {
             ),
         ));
 
+        // given
+        // when
         let result = runner.run_pre_tool_use("Edit", r#"{"file":"src/lib.rs"}"#);
 
-        assert!(!result.is_denied());
+        // then
+        assert!(result.is_failed());
         assert!(result
             .messages()
             .iter()
-            .any(|message| message.contains("allowing tool execution to continue")));
+            .any(|message| message.contains("warning hook")));
     }
 
     #[test]
@@ -801,6 +817,91 @@ mod tests {
 
         assert!(!result.is_denied());
         assert_eq!(result.messages(), &["failure hook ran".to_string()]);
+    }
+
+    #[test]
+    fn executes_hooks_in_configured_order() {
+        // given
+        let runner = HookRunner::new(RuntimeHookConfig::new(
+            vec![
+                shell_snippet("printf 'first'"),
+                shell_snippet("printf 'second'"),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mut reporter = RecordingReporter { events: Vec::new() };
+
+        // when
+        let result = runner.run_pre_tool_use_with_context(
+            "Read",
+            r#"{"path":"README.md"}"#,
+            None,
+            Some(&mut reporter),
+        );
+
+        // then
+        assert_eq!(
+            result,
+            HookRunResult::allow(vec!["first".to_string(), "second".to_string()])
+        );
+        assert_eq!(reporter.events.len(), 4);
+        assert!(matches!(
+            &reporter.events[0],
+            HookProgressEvent::Started {
+                event: HookEvent::PreToolUse,
+                command,
+                ..
+            } if command == "printf 'first'"
+        ));
+        assert!(matches!(
+            &reporter.events[1],
+            HookProgressEvent::Completed {
+                event: HookEvent::PreToolUse,
+                command,
+                ..
+            } if command == "printf 'first'"
+        ));
+        assert!(matches!(
+            &reporter.events[2],
+            HookProgressEvent::Started {
+                event: HookEvent::PreToolUse,
+                command,
+                ..
+            } if command == "printf 'second'"
+        ));
+        assert!(matches!(
+            &reporter.events[3],
+            HookProgressEvent::Completed {
+                event: HookEvent::PreToolUse,
+                command,
+                ..
+            } if command == "printf 'second'"
+        ));
+    }
+
+    #[test]
+    fn stops_running_hooks_after_failure() {
+        // given
+        let runner = HookRunner::new(RuntimeHookConfig::new(
+            vec![
+                shell_snippet("printf 'broken'; exit 1"),
+                shell_snippet("printf 'later'"),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ));
+
+        // when
+        let result = runner.run_pre_tool_use("Edit", r#"{"file":"src/lib.rs"}"#);
+
+        // then
+        assert!(result.is_failed());
+        assert!(result
+            .messages()
+            .iter()
+            .any(|message| message.contains("broken")));
+        assert!(!result.messages().iter().any(|message| message == "later"));
     }
 
     #[test]
