@@ -1749,8 +1749,8 @@ impl LiveCli {
                 self.run_bughunter(scope.as_deref())?;
                 false
             }
-            SlashCommand::Commit { args } => {
-                self.run_commit(args.as_deref())?;
+            SlashCommand::Commit => {
+                self.run_commit(None)?;
                 false
             }
             SlashCommand::Pr { context } => {
@@ -1769,8 +1769,8 @@ impl LiveCli {
                 self.run_teleport(target.as_deref())?;
                 false
             }
-            SlashCommand::DebugToolCall { args } => {
-                self.run_debug_tool_call(args.as_deref())?;
+            SlashCommand::DebugToolCall => {
+                self.run_debug_tool_call(None)?;
                 false
             }
             SlashCommand::Sandbox => {
@@ -2272,10 +2272,7 @@ impl LiveCli {
         Ok(())
     }
 
-    fn run_debug_tool_call(
-        &self,
-        args: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_debug_tool_call(&self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         validate_no_args("/debug-tool-call", args)?;
         println!("{}", render_last_tool_debug_report(self.runtime.session())?);
         Ok(())
@@ -2291,12 +2288,16 @@ impl LiveCli {
             return Ok(());
         }
 
-        println!("{}", format_commit_preflight_report(branch.as_deref(), summary));
+        println!(
+            "{}",
+            format_commit_preflight_report(branch.as_deref(), summary)
+        );
         Ok(())
     }
 
     fn run_pr(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let branch = resolve_git_branch_for(&env::current_dir()?).unwrap_or_else(|| "unknown".to_string());
+        let branch =
+            resolve_git_branch_for(&env::current_dir()?).unwrap_or_else(|| "unknown".to_string());
         println!("{}", format_pr_report(&branch, context));
         Ok(())
     }
@@ -3017,7 +3018,10 @@ fn indent_block(value: &str, spaces: usize) -> String {
         .join("\n")
 }
 
-fn validate_no_args(command_name: &str, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_no_args(
+    command_name: &str,
+    args: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(args) = args.map(str::trim).filter(|value| !value.is_empty()) {
         return Err(format!(
             "{command_name} does not accept arguments. Received: {args}\nUsage: {command_name}"
@@ -4853,9 +4857,9 @@ mod tests {
         permission_policy, print_help_to, push_output_block, render_config_report,
         render_diff_report, render_memory_report, render_repl_help, render_resume_usage,
         resolve_model_alias, resolve_session_reference, response_to_events,
-        resume_supported_slash_commands, run_resume_command, validate_no_args,
-        slash_command_completion_candidates_with_sessions, status_context, CliAction,
-        CliOutputFormat, GitWorkspaceSummary, InternalPromptProgressEvent,
+        resume_supported_slash_commands, run_resume_command,
+        slash_command_completion_candidates_with_sessions, status_context, validate_no_args,
+        CliAction, CliOutputFormat, GitWorkspaceSummary, InternalPromptProgressEvent,
         InternalPromptProgressState, LiveCli, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
@@ -5590,14 +5594,16 @@ mod tests {
         assert!(preflight.contains("Result           ready"));
         assert!(preflight.contains("Branch           feature/ux"));
         assert!(preflight.contains("Workspace        dirty · 2 files · 1 staged, 1 unstaged"));
-        assert!(preflight.contains("Action           create a git commit from the current workspace changes"));
+        assert!(preflight
+            .contains("Action           create a git commit from the current workspace changes"));
     }
 
     #[test]
     fn commit_skipped_report_points_to_next_steps() {
         let report = format_commit_skipped_report();
         assert!(report.contains("Reason           no workspace changes"));
-        assert!(report.contains("Action           create a git commit from the current workspace changes"));
+        assert!(report
+            .contains("Action           create a git commit from the current workspace changes"));
         assert!(report.contains("/status to inspect context"));
         assert!(report.contains("/diff to inspect repo changes"));
     }

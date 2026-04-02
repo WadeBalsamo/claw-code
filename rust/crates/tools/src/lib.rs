@@ -3157,8 +3157,8 @@ mod tests {
             .expect_err("unknown plugin permission should fail");
         assert!(unknown_permission.contains("unsupported plugin permission: admin"));
 
-        let empty_permission = permission_mode_from_plugin("")
-            .expect_err("empty plugin permission should fail");
+        let empty_permission =
+            permission_mode_from_plugin("").expect_err("empty plugin permission should fail");
         assert!(empty_permission.contains("unsupported plugin permission: "));
     }
 
