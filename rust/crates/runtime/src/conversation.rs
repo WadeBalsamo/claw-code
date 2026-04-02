@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
+use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
@@ -319,13 +320,14 @@ where
                     return Err(error);
                 }
             };
-            let (assistant_message, usage) = match build_assistant_message(events) {
-                Ok(result) => result,
-                Err(error) => {
-                    self.record_turn_failed(iterations, &error);
-                    return Err(error);
-                }
-            };
+            let (assistant_message, usage, turn_prompt_cache_events) =
+                match build_assistant_message(events) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.record_turn_failed(iterations, &error);
+                        return Err(error);
+                    }
+                };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
@@ -397,6 +399,7 @@ where
 
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
+                        self.record_tool_started(iterations, &tool_name);
                         let (mut output, mut is_error) =
                             match self.tool_executor.execute(&tool_name, &effective_input) {
                                 Ok(output) => (output, false),
@@ -439,20 +442,24 @@ where
                 self.session
                     .push_message(result_message.clone())
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
+                self.record_tool_finished(iterations, &result_message);
                 tool_results.push(result_message);
             }
         }
 
         let auto_compaction = self.maybe_auto_compact();
 
-        Ok(TurnSummary {
+        let summary = TurnSummary {
             assistant_messages,
             tool_results,
             prompt_cache_events,
             iterations,
             usage: self.usage_tracker.cumulative_usage(),
             auto_compaction,
-        })
+        };
+        self.record_turn_completed(&summary);
+
+        Ok(summary)
     }
 
     #[must_use]
@@ -510,23 +517,112 @@ where
         })
     }
 
-    fn record_turn_started(&self, _user_input: &str) {}
+    fn record_turn_started(&self, user_input: &str) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+
+        let mut attributes = Map::new();
+        attributes.insert(
+            "user_input".to_string(),
+            Value::String(user_input.to_string()),
+        );
+        session_tracer.record("turn_started", attributes);
+    }
 
     fn record_assistant_iteration(
         &self,
-        _iteration: usize,
-        _assistant_message: &ConversationMessage,
-        _pending_tool_use_count: usize,
+        iteration: usize,
+        assistant_message: &ConversationMessage,
+        pending_tool_use_count: usize,
     ) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+
+        let mut attributes = Map::new();
+        attributes.insert("iteration".to_string(), Value::from(iteration as u64));
+        attributes.insert(
+            "assistant_blocks".to_string(),
+            Value::from(assistant_message.blocks.len() as u64),
+        );
+        attributes.insert(
+            "pending_tool_use_count".to_string(),
+            Value::from(pending_tool_use_count as u64),
+        );
+        session_tracer.record("assistant_iteration_completed", attributes);
     }
 
-    fn record_tool_started(&self, _iteration: usize, _tool_name: &str) {}
+    fn record_tool_started(&self, iteration: usize, tool_name: &str) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
 
-    fn record_tool_finished(&self, _iteration: usize, _result_message: &ConversationMessage) {}
+        let mut attributes = Map::new();
+        attributes.insert("iteration".to_string(), Value::from(iteration as u64));
+        attributes.insert(
+            "tool_name".to_string(),
+            Value::String(tool_name.to_string()),
+        );
+        session_tracer.record("tool_execution_started", attributes);
+    }
 
-    fn record_turn_completed(&self, _summary: &TurnSummary) {}
+    fn record_tool_finished(&self, iteration: usize, result_message: &ConversationMessage) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
 
-    fn record_turn_failed(&self, _iteration: usize, _error: &RuntimeError) {}
+        let Some(ContentBlock::ToolResult {
+            tool_name,
+            is_error,
+            ..
+        }) = result_message.blocks.first()
+        else {
+            return;
+        };
+
+        let mut attributes = Map::new();
+        attributes.insert("iteration".to_string(), Value::from(iteration as u64));
+        attributes.insert("tool_name".to_string(), Value::String(tool_name.clone()));
+        attributes.insert("is_error".to_string(), Value::Bool(*is_error));
+        session_tracer.record("tool_execution_finished", attributes);
+    }
+
+    fn record_turn_completed(&self, summary: &TurnSummary) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+
+        let mut attributes = Map::new();
+        attributes.insert(
+            "iterations".to_string(),
+            Value::from(summary.iterations as u64),
+        );
+        attributes.insert(
+            "assistant_messages".to_string(),
+            Value::from(summary.assistant_messages.len() as u64),
+        );
+        attributes.insert(
+            "tool_results".to_string(),
+            Value::from(summary.tool_results.len() as u64),
+        );
+        attributes.insert(
+            "prompt_cache_events".to_string(),
+            Value::from(summary.prompt_cache_events.len() as u64),
+        );
+        session_tracer.record("turn_completed", attributes);
+    }
+
+    fn record_turn_failed(&self, iteration: usize, error: &RuntimeError) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+
+        let mut attributes = Map::new();
+        attributes.insert("iteration".to_string(), Value::from(iteration as u64));
+        attributes.insert("error".to_string(), Value::String(error.to_string()));
+        session_tracer.record("turn_failed", attributes);
+    }
 }
 
 #[must_use]
@@ -665,8 +761,8 @@ impl ToolExecutor for StaticToolExecutor {
 mod tests {
     use super::{
         parse_auto_compaction_threshold, ApiClient, ApiRequest, AssistantEvent,
-        AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor,
-        DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+        AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
+        StaticToolExecutor, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -679,7 +775,9 @@ mod tests {
     use crate::usage::TokenUsage;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use telemetry::{MemoryTelemetrySink, SessionTracer, TelemetryEvent};
 
     struct ScriptedApiClient {
         call_count: usize,
@@ -1217,19 +1315,17 @@ mod tests {
             }
         }
 
-        let session = Session {
-            version: 1,
-            messages: vec![
-                crate::session::ConversationMessage::user_text("one"),
-                crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "two".to_string(),
-                }]),
-                crate::session::ConversationMessage::user_text("three"),
-                crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "four".to_string(),
-                }]),
-            ],
-        };
+        let mut session = Session::new();
+        session.messages = vec![
+            crate::session::ConversationMessage::user_text("one"),
+            crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two".to_string(),
+            }]),
+            crate::session::ConversationMessage::user_text("three"),
+            crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four".to_string(),
+            }]),
+        ];
 
         let mut runtime = ConversationRuntime::new(
             session,

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
     resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
-    InputMessage, JsonlTelemetrySink, MessageRequest, MessageResponse, OutputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
     SessionTracer, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
     ToolResultContentBlock,
 };
@@ -3277,8 +3277,7 @@ impl AnthropicRuntimeClient {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url())
-                .with_prompt_cache(PromptCache::new(session_id)),
+                .with_base_url(api::read_base_url()),
             model,
             enable_tools,
             emit_output,
@@ -4037,25 +4036,7 @@ fn response_to_events(
     Ok(events)
 }
 
-fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
-    if let Some(event) = client
-        .take_last_prompt_cache_record()
-        .and_then(prompt_cache_record_to_runtime_event)
-    {
-        events.push(AssistantEvent::PromptCache(event));
-    }
-}
-
-fn prompt_cache_record_to_runtime_event(record: PromptCacheRecord) -> Option<PromptCacheEvent> {
-    let cache_break = record.cache_break?;
-    Some(PromptCacheEvent {
-        unexpected: cache_break.unexpected,
-        reason: cache_break.reason,
-        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
-        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
-        token_drop: cache_break.token_drop,
-    })
-}
+fn push_prompt_cache_record(_client: &AnthropicClient, _events: &mut Vec<AssistantEvent>) {}
 
 struct CliToolExecutor {
     renderer: TerminalRenderer,
@@ -4273,19 +4254,18 @@ mod tests {
         format_permissions_report,
         format_permissions_switch_report, format_resume_report, format_status_report,
         format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
-        parse_git_status_branch, parse_git_status_metadata, permission_policy, print_help_to,
-        push_output_block, render_config_report, render_diff_report, render_memory_report,
-        render_repl_help, resolve_model_alias, response_to_events,
+        parse_git_status_branch, parse_git_status_metadata_for, permission_policy,
+        print_help_to, push_output_block, render_config_report, render_diff_report,
+        render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
         resume_supported_slash_commands, run_resume_command, status_context, CliAction,
-        CliOutputFormat, HookAbortMonitor, InternalPromptProgressEvent,
+        CliOutputFormat, InternalPromptProgressEvent,
         InternalPromptProgressState, SlashCommand, StatusUsage, DEFAULT_MODEL,
         create_managed_session_handle, resolve_session_reference,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
     use runtime::{
-        AssistantEvent, ContentBlock, ConversationMessage, HookAbortSignal, MessageRole,
-        PermissionMode, Session,
+        AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode, Session,
     };
     use serde_json::json;
     use std::fs;
@@ -4354,8 +4334,6 @@ mod tests {
         std::env::set_current_dir(previous).expect("cwd should restore");
         result
     }
-    use std::sync::mpsc;
-
     #[test]
     fn defaults_to_repl_when_no_args() {
         assert_eq!(
@@ -4626,7 +4604,12 @@ mod tests {
 
     #[test]
     fn permission_policy_uses_plugin_tool_permissions() {
-        let policy = permission_policy(PermissionMode::ReadOnly, &registry_with_plugin_tool());
+        let feature_config = runtime::RuntimeFeatureConfig::default();
+        let policy = permission_policy(
+            PermissionMode::ReadOnly,
+            &feature_config,
+            &registry_with_plugin_tool(),
+        );
         let required = policy.required_mode_for("plugin_echo");
         assert_eq!(required, PermissionMode::WorkspaceWrite);
     }
@@ -4844,12 +4827,13 @@ mod tests {
         let _guard = env_lock();
         let temp_root = temp_dir();
         fs::create_dir_all(&temp_root).expect("root dir");
-        let (project_root, branch) = with_current_dir(&temp_root, || {
-            parse_git_status_metadata(Some(
+        let (project_root, branch) = parse_git_status_metadata_for(
+            &temp_root,
+            Some(
                 "## rcc/cli...origin/rcc/cli
  M src/main.rs",
-            ))
-        });
+            ),
+        );
         assert_eq!(branch.as_deref(), Some("rcc/cli"));
         assert!(project_root.is_none());
         fs::remove_dir_all(temp_root).expect("cleanup temp dir");
@@ -5057,7 +5041,7 @@ mod tests {
         let handle = create_managed_session_handle("session-alpha").expect("jsonl handle");
         assert!(handle.path.ends_with("session-alpha.jsonl"));
 
-        let legacy_path = workspace.join(".claude/sessions/legacy.json");
+        let legacy_path = workspace.join(".claw/sessions/legacy.json");
         std::fs::create_dir_all(
             legacy_path
                 .parent()
@@ -5070,7 +5054,10 @@ mod tests {
             .expect("legacy session should save");
 
         let resolved = resolve_session_reference("legacy").expect("legacy session should resolve");
-        assert_eq!(resolved.path, legacy_path);
+        assert_eq!(
+            resolved.path.canonicalize().expect("resolved path should exist"),
+            legacy_path.canonicalize().expect("legacy path should exist")
+        );
 
         std::env::set_current_dir(previous).expect("restore cwd");
         std::fs::remove_dir_all(workspace).expect("workspace should clean up");
@@ -5455,7 +5442,10 @@ mod tests {
 
 #[cfg(test)]
 mod sandbox_report_tests {
-    use super::format_sandbox_report;
+    use super::{format_sandbox_report, HookAbortMonitor};
+    use runtime::HookAbortSignal;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn sandbox_report_renders_expected_fields() {

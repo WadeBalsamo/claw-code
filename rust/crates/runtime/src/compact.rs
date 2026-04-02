@@ -577,21 +577,17 @@ mod tests {
 
     #[test]
     fn keeps_previous_compacted_context_when_compacting_again() {
-        let initial_session = Session {
-            version: 1,
-            messages: vec![
-                ConversationMessage::user_text("Investigate rust/crates/runtime/src/compact.rs"),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "I will inspect the compact flow.".to_string(),
-                }]),
-                ConversationMessage::user_text(
-                    "Also update rust/crates/runtime/src/conversation.rs",
-                ),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "Next: preserve prior summary context during auto compact.".to_string(),
-                }]),
-            ],
-        };
+        let mut initial_session = Session::new();
+        initial_session.messages = vec![
+            ConversationMessage::user_text("Investigate rust/crates/runtime/src/compact.rs"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "I will inspect the compact flow.".to_string(),
+            }]),
+            ConversationMessage::user_text("Also update rust/crates/runtime/src/conversation.rs"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Next: preserve prior summary context during auto compact.".to_string(),
+            }]),
+        ];
         let config = CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
@@ -606,13 +602,9 @@ mod tests {
             }]),
         ]);
 
-        let second = compact_session(
-            &Session {
-                version: 1,
-                messages: follow_up_messages,
-            },
-            config,
-        );
+        let mut second_session = Session::new();
+        second_session.messages = follow_up_messages;
+        let second = compact_session(&second_session, config);
 
         assert!(second
             .formatted_summary
@@ -641,22 +633,20 @@ mod tests {
     #[test]
     fn ignores_existing_compacted_summary_when_deciding_to_recompact() {
         let summary = "<summary>Conversation summary:\n- Scope: earlier work preserved.\n- Key timeline:\n  - user: large preserved context\n</summary>";
-        let session = Session {
-            version: 1,
-            messages: vec![
-                ConversationMessage {
-                    role: MessageRole::System,
-                    blocks: vec![ContentBlock::Text {
-                        text: get_compact_continuation_message(summary, true, true),
-                    }],
-                    usage: None,
-                },
-                ConversationMessage::user_text("tiny"),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "recent".to_string(),
-                }]),
-            ],
-        };
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage {
+                role: MessageRole::System,
+                blocks: vec![ContentBlock::Text {
+                    text: get_compact_continuation_message(summary, true, true),
+                }],
+                usage: None,
+            },
+            ConversationMessage::user_text("tiny"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "recent".to_string(),
+            }]),
+        ];
 
         assert!(!should_compact(
             &session,

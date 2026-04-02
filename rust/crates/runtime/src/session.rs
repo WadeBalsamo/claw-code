@@ -161,8 +161,15 @@ impl Session {
         let path = path.as_ref();
         let contents = fs::read_to_string(path)?;
         let session = match JsonValue::parse(&contents) {
-            Ok(value) => Self::from_json(&value)?,
+            Ok(value)
+                if value
+                    .as_object()
+                    .is_some_and(|object| object.contains_key("messages")) =>
+            {
+                Self::from_json(&value)?
+            }
             Err(_) => Self::from_jsonl(&contents)?,
+            Ok(_) => Self::from_jsonl(&contents)?,
         };
         Ok(session.with_persistence_path(path.to_path_buf()))
     }
