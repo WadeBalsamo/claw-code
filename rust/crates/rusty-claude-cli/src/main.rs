@@ -1464,7 +1464,47 @@ fn run_resume_command(
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
-        | SlashCommand::Plugins { .. } => Err("unsupported resumed slash command".into()),
+        | SlashCommand::Plugins { .. }
+        | SlashCommand::Doctor
+        | SlashCommand::Login
+        | SlashCommand::Logout
+        | SlashCommand::Vim
+        | SlashCommand::Upgrade
+        | SlashCommand::Stats
+        | SlashCommand::Share
+        | SlashCommand::Feedback
+        | SlashCommand::Files
+        | SlashCommand::Fast
+        | SlashCommand::Exit
+        | SlashCommand::Summary
+        | SlashCommand::Desktop
+        | SlashCommand::Brief
+        | SlashCommand::Advisor
+        | SlashCommand::Stickers
+        | SlashCommand::Insights
+        | SlashCommand::Thinkback
+        | SlashCommand::ReleaseNotes
+        | SlashCommand::SecurityReview
+        | SlashCommand::Keybindings
+        | SlashCommand::PrivacySettings
+        | SlashCommand::Plan { .. }
+        | SlashCommand::Review { .. }
+        | SlashCommand::Tasks { .. }
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Voice { .. }
+        | SlashCommand::Usage { .. }
+        | SlashCommand::Rename { .. }
+        | SlashCommand::Copy { .. }
+        | SlashCommand::Hooks { .. }
+        | SlashCommand::Context { .. }
+        | SlashCommand::Color { .. }
+        | SlashCommand::Effort { .. }
+        | SlashCommand::Branch { .. }
+        | SlashCommand::Rewind { .. }
+        | SlashCommand::Ide { .. }
+        | SlashCommand::Tag { .. }
+        | SlashCommand::OutputStyle { .. }
+        | SlashCommand::AddDir { .. } => Err("unsupported resumed slash command".into()),
     }
 }
 
@@ -1968,6 +2008,49 @@ impl LiveCli {
             }
             SlashCommand::Skills { args } => {
                 Self::print_skills(args.as_deref())?;
+                false
+            }
+            SlashCommand::Doctor
+            | SlashCommand::Login
+            | SlashCommand::Logout
+            | SlashCommand::Vim
+            | SlashCommand::Upgrade
+            | SlashCommand::Stats
+            | SlashCommand::Share
+            | SlashCommand::Feedback
+            | SlashCommand::Files
+            | SlashCommand::Fast
+            | SlashCommand::Exit
+            | SlashCommand::Summary
+            | SlashCommand::Desktop
+            | SlashCommand::Brief
+            | SlashCommand::Advisor
+            | SlashCommand::Stickers
+            | SlashCommand::Insights
+            | SlashCommand::Thinkback
+            | SlashCommand::ReleaseNotes
+            | SlashCommand::SecurityReview
+            | SlashCommand::Keybindings
+            | SlashCommand::PrivacySettings
+            | SlashCommand::Plan { .. }
+            | SlashCommand::Review { .. }
+            | SlashCommand::Tasks { .. }
+            | SlashCommand::Theme { .. }
+            | SlashCommand::Voice { .. }
+            | SlashCommand::Usage { .. }
+            | SlashCommand::Rename { .. }
+            | SlashCommand::Copy { .. }
+            | SlashCommand::Hooks { .. }
+            | SlashCommand::Context { .. }
+            | SlashCommand::Color { .. }
+            | SlashCommand::Effort { .. }
+            | SlashCommand::Branch { .. }
+            | SlashCommand::Rewind { .. }
+            | SlashCommand::Ide { .. }
+            | SlashCommand::Tag { .. }
+            | SlashCommand::OutputStyle { .. }
+            | SlashCommand::AddDir { .. } => {
+                eprintln!("Command registered but not yet implemented.");
                 false
             }
             SlashCommand::Unknown(name) => {
@@ -5590,9 +5673,9 @@ mod tests {
 
     #[test]
     fn formats_unknown_slash_command_with_suggestions() {
-        let report = format_unknown_slash_command_message("stats");
-        assert!(report.contains("unknown slash command: /stats"));
-        assert!(report.contains("Did you mean /status?"));
+        let report = format_unknown_slash_command_message("statsu");
+        assert!(report.contains("unknown slash command: /statsu"));
+        assert!(report.contains("Did you mean"));
         assert!(report.contains("Use /help"));
     }
 
@@ -5830,8 +5913,45 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "sandbox", "compact", "clear", "cost", "config", "mcp", "memory",
-                "init", "diff", "version", "export", "agents", "skills",
+                "help",
+                "status",
+                "sandbox",
+                "compact",
+                "clear",
+                "cost",
+                "config",
+                "mcp",
+                "memory",
+                "init",
+                "diff",
+                "version",
+                "export",
+                "agents",
+                "skills",
+                "doctor",
+                "plan",
+                "tasks",
+                "theme",
+                "vim",
+                "usage",
+                "stats",
+                "copy",
+                "hooks",
+                "files",
+                "context",
+                "color",
+                "effort",
+                "fast",
+                "summary",
+                "tag",
+                "brief",
+                "advisor",
+                "stickers",
+                "insights",
+                "thinkback",
+                "keybindings",
+                "privacy-settings",
+                "output-style",
             ]
         );
     }

@@ -241,6 +241,286 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         argument_hint: Some("[list|install <path>|help]"),
         resume_supported: true,
     },
+    SlashCommandSpec {
+        name: "doctor",
+        aliases: &[],
+        summary: "Diagnose setup issues and environment health",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "login",
+        aliases: &[],
+        summary: "Log in to the service",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "logout",
+        aliases: &[],
+        summary: "Log out of the current session",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "plan",
+        aliases: &[],
+        summary: "Toggle or inspect planning mode",
+        argument_hint: Some("[on|off]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "review",
+        aliases: &[],
+        summary: "Run a code review on current changes",
+        argument_hint: Some("[scope]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "tasks",
+        aliases: &[],
+        summary: "List and manage background tasks",
+        argument_hint: Some("[list|get <id>|stop <id>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "theme",
+        aliases: &[],
+        summary: "Switch the terminal color theme",
+        argument_hint: Some("[theme-name]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "vim",
+        aliases: &[],
+        summary: "Toggle vim keybinding mode",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "voice",
+        aliases: &[],
+        summary: "Toggle voice input mode",
+        argument_hint: Some("[on|off]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "upgrade",
+        aliases: &[],
+        summary: "Check for and install CLI updates",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "usage",
+        aliases: &[],
+        summary: "Show detailed API usage statistics",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "stats",
+        aliases: &[],
+        summary: "Show workspace and session statistics",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "rename",
+        aliases: &[],
+        summary: "Rename the current session",
+        argument_hint: Some("<name>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "copy",
+        aliases: &[],
+        summary: "Copy conversation or output to clipboard",
+        argument_hint: Some("[last|all]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "share",
+        aliases: &[],
+        summary: "Share the current conversation",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "feedback",
+        aliases: &[],
+        summary: "Submit feedback about the current session",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "hooks",
+        aliases: &[],
+        summary: "List and manage lifecycle hooks",
+        argument_hint: Some("[list|run <hook>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "files",
+        aliases: &[],
+        summary: "List files in the current context window",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "context",
+        aliases: &[],
+        summary: "Inspect or manage the conversation context",
+        argument_hint: Some("[show|clear]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "color",
+        aliases: &[],
+        summary: "Configure terminal color settings",
+        argument_hint: Some("[scheme]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "effort",
+        aliases: &[],
+        summary: "Set the effort level for responses",
+        argument_hint: Some("[low|medium|high]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "fast",
+        aliases: &[],
+        summary: "Toggle fast/concise response mode",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "exit",
+        aliases: &[],
+        summary: "Exit the REPL session",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "branch",
+        aliases: &[],
+        summary: "Create or switch git branches",
+        argument_hint: Some("[name]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "rewind",
+        aliases: &[],
+        summary: "Rewind the conversation to a previous state",
+        argument_hint: Some("[steps]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "summary",
+        aliases: &[],
+        summary: "Generate a summary of the conversation",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "desktop",
+        aliases: &[],
+        summary: "Open or manage the desktop app integration",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "ide",
+        aliases: &[],
+        summary: "Open or configure IDE integration",
+        argument_hint: Some("[vscode|cursor]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "tag",
+        aliases: &[],
+        summary: "Tag the current conversation point",
+        argument_hint: Some("[label]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "brief",
+        aliases: &[],
+        summary: "Toggle brief output mode",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "advisor",
+        aliases: &[],
+        summary: "Toggle advisor mode for guidance-only responses",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "stickers",
+        aliases: &[],
+        summary: "Browse and manage sticker packs",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "insights",
+        aliases: &[],
+        summary: "Show AI-generated insights about the session",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "thinkback",
+        aliases: &[],
+        summary: "Replay the thinking process of the last response",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "release-notes",
+        aliases: &[],
+        summary: "Generate release notes from recent changes",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "security-review",
+        aliases: &[],
+        summary: "Run a security review on the codebase",
+        argument_hint: Some("[scope]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "keybindings",
+        aliases: &[],
+        summary: "Show or configure keyboard shortcuts",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "privacy-settings",
+        aliases: &[],
+        summary: "View or modify privacy settings",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "output-style",
+        aliases: &[],
+        summary: "Switch output formatting style",
+        argument_hint: Some("[style]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "add-dir",
+        aliases: &[],
+        summary: "Add an additional directory to the context",
+        argument_hint: Some("<path>"),
+        resume_supported: false,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +587,82 @@ pub enum SlashCommand {
     Skills {
         args: Option<String>,
     },
+    Doctor,
+    Login,
+    Logout,
+    Vim,
+    Upgrade,
+    Stats,
+    Share,
+    Feedback,
+    Files,
+    Fast,
+    Exit,
+    Summary,
+    Desktop,
+    Brief,
+    Advisor,
+    Stickers,
+    Insights,
+    Thinkback,
+    ReleaseNotes,
+    SecurityReview,
+    Keybindings,
+    PrivacySettings,
+    Plan {
+        mode: Option<String>,
+    },
+    Review {
+        scope: Option<String>,
+    },
+    Tasks {
+        args: Option<String>,
+    },
+    Theme {
+        name: Option<String>,
+    },
+    Voice {
+        mode: Option<String>,
+    },
+    Usage {
+        scope: Option<String>,
+    },
+    Rename {
+        name: Option<String>,
+    },
+    Copy {
+        target: Option<String>,
+    },
+    Hooks {
+        args: Option<String>,
+    },
+    Context {
+        action: Option<String>,
+    },
+    Color {
+        scheme: Option<String>,
+    },
+    Effort {
+        level: Option<String>,
+    },
+    Branch {
+        name: Option<String>,
+    },
+    Rewind {
+        steps: Option<String>,
+    },
+    Ide {
+        target: Option<String>,
+    },
+    Tag {
+        label: Option<String>,
+    },
+    OutputStyle {
+        style: Option<String>,
+    },
+    AddDir {
+        path: Option<String>,
+    },
     Unknown(String),
 }
 
@@ -337,6 +693,7 @@ impl SlashCommand {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn validate_slash_command_input(
     input: &str,
 ) -> Result<Option<SlashCommand>, SlashCommandParseError> {
@@ -433,6 +790,112 @@ pub fn validate_slash_command_input(
         "skills" => SlashCommand::Skills {
             args: parse_skills_args(remainder.as_deref())?,
         },
+        "doctor" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Doctor
+        }
+        "login" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Login
+        }
+        "logout" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Logout
+        }
+        "vim" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Vim
+        }
+        "upgrade" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Upgrade
+        }
+        "stats" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Stats
+        }
+        "share" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Share
+        }
+        "feedback" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Feedback
+        }
+        "files" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Files
+        }
+        "fast" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Fast
+        }
+        "exit" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Exit
+        }
+        "summary" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Summary
+        }
+        "desktop" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Desktop
+        }
+        "brief" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Brief
+        }
+        "advisor" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Advisor
+        }
+        "stickers" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Stickers
+        }
+        "insights" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Insights
+        }
+        "thinkback" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Thinkback
+        }
+        "release-notes" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::ReleaseNotes
+        }
+        "security-review" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::SecurityReview
+        }
+        "keybindings" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Keybindings
+        }
+        "privacy-settings" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::PrivacySettings
+        }
+        "plan" => SlashCommand::Plan { mode: remainder },
+        "review" => SlashCommand::Review { scope: remainder },
+        "tasks" => SlashCommand::Tasks { args: remainder },
+        "theme" => SlashCommand::Theme { name: remainder },
+        "voice" => SlashCommand::Voice { mode: remainder },
+        "usage" => SlashCommand::Usage { scope: remainder },
+        "rename" => SlashCommand::Rename { name: remainder },
+        "copy" => SlashCommand::Copy { target: remainder },
+        "hooks" => SlashCommand::Hooks { args: remainder },
+        "context" => SlashCommand::Context { action: remainder },
+        "color" => SlashCommand::Color { scheme: remainder },
+        "effort" => SlashCommand::Effort { level: remainder },
+        "branch" => SlashCommand::Branch { name: remainder },
+        "rewind" => SlashCommand::Rewind { steps: remainder },
+        "ide" => SlashCommand::Ide { target: remainder },
+        "tag" => SlashCommand::Tag { label: remainder },
+        "output-style" => SlashCommand::OutputStyle { style: remainder },
+        "add-dir" => SlashCommand::AddDir { path: remainder },
         other => SlashCommand::Unknown(other.to_string()),
     }))
 }
@@ -805,11 +1268,22 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
 fn slash_command_category(name: &str) -> &'static str {
     match name {
         "help" | "status" | "sandbox" | "model" | "permissions" | "cost" | "resume" | "session"
-        | "version" => "Session & visibility",
+        | "version" | "login" | "logout" | "usage" | "stats" | "rename" | "privacy-settings" => {
+            "Session & visibility"
+        }
         "compact" | "clear" | "config" | "memory" | "init" | "diff" | "commit" | "pr" | "issue"
-        | "export" | "plugin" => "Workspace & git",
-        "agents" | "skills" | "teleport" | "debug-tool-call" | "mcp" => "Discovery & debugging",
-        "bughunter" | "ultraplan" => "Analysis & automation",
+        | "export" | "plugin" | "branch" | "add-dir" | "files" | "hooks" | "release-notes" => {
+            "Workspace & git"
+        }
+        "agents" | "skills" | "teleport" | "debug-tool-call" | "mcp" | "context" | "tasks"
+        | "doctor" | "ide" | "desktop" => "Discovery & debugging",
+        "bughunter" | "ultraplan" | "review" | "security-review" | "advisor" | "insights" => {
+            "Analysis & automation"
+        }
+        "theme" | "vim" | "voice" | "color" | "effort" | "fast" | "brief" | "output-style"
+        | "keybindings" | "stickers" => "Appearance & input",
+        "copy" | "share" | "feedback" | "summary" | "tag" | "thinkback" | "plan" | "exit"
+        | "upgrade" | "rewind" => "Communication & control",
         _ => "Other",
     }
 }
@@ -2222,6 +2696,46 @@ pub fn handle_slash_command(
         | SlashCommand::Plugins { .. }
         | SlashCommand::Agents { .. }
         | SlashCommand::Skills { .. }
+        | SlashCommand::Doctor
+        | SlashCommand::Login
+        | SlashCommand::Logout
+        | SlashCommand::Vim
+        | SlashCommand::Upgrade
+        | SlashCommand::Stats
+        | SlashCommand::Share
+        | SlashCommand::Feedback
+        | SlashCommand::Files
+        | SlashCommand::Fast
+        | SlashCommand::Exit
+        | SlashCommand::Summary
+        | SlashCommand::Desktop
+        | SlashCommand::Brief
+        | SlashCommand::Advisor
+        | SlashCommand::Stickers
+        | SlashCommand::Insights
+        | SlashCommand::Thinkback
+        | SlashCommand::ReleaseNotes
+        | SlashCommand::SecurityReview
+        | SlashCommand::Keybindings
+        | SlashCommand::PrivacySettings
+        | SlashCommand::Plan { .. }
+        | SlashCommand::Review { .. }
+        | SlashCommand::Tasks { .. }
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Voice { .. }
+        | SlashCommand::Usage { .. }
+        | SlashCommand::Rename { .. }
+        | SlashCommand::Copy { .. }
+        | SlashCommand::Hooks { .. }
+        | SlashCommand::Context { .. }
+        | SlashCommand::Color { .. }
+        | SlashCommand::Effort { .. }
+        | SlashCommand::Branch { .. }
+        | SlashCommand::Rewind { .. }
+        | SlashCommand::Ide { .. }
+        | SlashCommand::Tag { .. }
+        | SlashCommand::OutputStyle { .. }
+        | SlashCommand::AddDir { .. }
         | SlashCommand::Unknown(_) => None,
     }
 }
@@ -2653,8 +3167,8 @@ mod tests {
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents [list|help]"));
         assert!(help.contains("/skills [list|install <path>|help]"));
-        assert_eq!(slash_command_specs().len(), 27);
-        assert_eq!(resume_supported_slash_commands().len(), 15);
+        assert_eq!(slash_command_specs().len(), 67);
+        assert_eq!(resume_supported_slash_commands().len(), 39);
     }
 
     #[test]
@@ -2704,7 +3218,10 @@ mod tests {
 
     #[test]
     fn suggests_closest_slash_commands_for_typos_and_aliases() {
-        assert_eq!(suggest_slash_commands("stats", 3), vec!["/status"]);
+        assert_eq!(
+            suggest_slash_commands("stats", 3),
+            vec!["/stats", "/status"]
+        );
         assert_eq!(suggest_slash_commands("/plugns", 3), vec!["/plugin"]);
         assert_eq!(suggest_slash_commands("zzz", 3), Vec::<String>::new());
     }
