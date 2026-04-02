@@ -505,6 +505,26 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "EnterPlanMode",
+            description: "Enable a worktree-local planning mode override and remember the previous local setting for ExitPlanMode.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "ExitPlanMode",
+            description: "Restore or clear the worktree-local planning mode override created by EnterPlanMode.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "StructuredOutput",
             description: "Return structured output in the requested format.",
             input_schema: json!({
@@ -565,6 +585,8 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
+        "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
+        "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
@@ -656,6 +678,14 @@ fn run_brief(input: BriefInput) -> Result<String, String> {
 
 fn run_config(input: ConfigInput) -> Result<String, String> {
     to_pretty_json(execute_config(input)?)
+}
+
+fn run_enter_plan_mode(input: EnterPlanModeInput) -> Result<String, String> {
+    to_pretty_json(execute_enter_plan_mode(input)?)
+}
+
+fn run_exit_plan_mode(input: ExitPlanModeInput) -> Result<String, String> {
+    to_pretty_json(execute_exit_plan_mode(input)?)
 }
 
 fn run_structured_output(input: StructuredOutputInput) -> Result<String, String> {
@@ -809,6 +839,14 @@ struct ConfigInput {
     setting: String,
     value: Option<ConfigValue>,
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EnterPlanModeInput {}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ExitPlanModeInput {}
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -965,6 +1003,32 @@ struct ConfigOutput {
     #[serde(rename = "newValue")]
     new_value: Option<Value>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlanModeState {
+    #[serde(rename = "hadLocalOverride")]
+    had_local_override: bool,
+    #[serde(rename = "previousLocalMode")]
+    previous_local_mode: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlanModeOutput {
+    success: bool,
+    operation: String,
+    changed: bool,
+    active: bool,
+    managed: bool,
+    message: String,
+    #[serde(rename = "settingsPath")]
+    settings_path: String,
+    #[serde(rename = "statePath")]
+    state_path: String,
+    #[serde(rename = "previousLocalMode")]
+    previous_local_mode: Option<Value>,
+    #[serde(rename = "currentLocalMode")]
+    current_local_mode: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2575,6 +2639,148 @@ fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
     }
 }
 
+const PERMISSION_DEFAULT_MODE_PATH: &[&str] = &["permissions", "defaultMode"];
+
+fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOutput, String> {
+    let settings_path = config_file_for_scope(ConfigScope::Settings)?;
+    let state_path = plan_mode_state_file()?;
+    let mut document = read_json_object(&settings_path)?;
+    let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
+    let current_is_plan =
+        matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
+
+    if let Some(state) = read_plan_mode_state(&state_path)? {
+        if current_is_plan {
+            return Ok(PlanModeOutput {
+                success: true,
+                operation: String::from("enter"),
+                changed: false,
+                active: true,
+                managed: true,
+                message: String::from("Plan mode override is already active for this worktree."),
+                settings_path: settings_path.display().to_string(),
+                state_path: state_path.display().to_string(),
+                previous_local_mode: state.previous_local_mode,
+                current_local_mode,
+            });
+        }
+        clear_plan_mode_state(&state_path)?;
+    }
+
+    if current_is_plan {
+        return Ok(PlanModeOutput {
+            success: true,
+            operation: String::from("enter"),
+            changed: false,
+            active: true,
+            managed: false,
+            message: String::from(
+                "Worktree-local plan mode is already enabled outside EnterPlanMode; leaving it unchanged.",
+            ),
+            settings_path: settings_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            previous_local_mode: None,
+            current_local_mode,
+        });
+    }
+
+    let state = PlanModeState {
+        had_local_override: current_local_mode.is_some(),
+        previous_local_mode: current_local_mode.clone(),
+    };
+    write_plan_mode_state(&state_path, &state)?;
+    set_nested_value(
+        &mut document,
+        PERMISSION_DEFAULT_MODE_PATH,
+        Value::String(String::from("plan")),
+    );
+    write_json_object(&settings_path, &document)?;
+
+    Ok(PlanModeOutput {
+        success: true,
+        operation: String::from("enter"),
+        changed: true,
+        active: true,
+        managed: true,
+        message: String::from("Enabled worktree-local plan mode override."),
+        settings_path: settings_path.display().to_string(),
+        state_path: state_path.display().to_string(),
+        previous_local_mode: state.previous_local_mode,
+        current_local_mode: get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned(),
+    })
+}
+
+fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutput, String> {
+    let settings_path = config_file_for_scope(ConfigScope::Settings)?;
+    let state_path = plan_mode_state_file()?;
+    let mut document = read_json_object(&settings_path)?;
+    let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
+    let current_is_plan =
+        matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
+
+    let Some(state) = read_plan_mode_state(&state_path)? else {
+        return Ok(PlanModeOutput {
+            success: true,
+            operation: String::from("exit"),
+            changed: false,
+            active: current_is_plan,
+            managed: false,
+            message: String::from("No EnterPlanMode override is active for this worktree."),
+            settings_path: settings_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            previous_local_mode: None,
+            current_local_mode,
+        });
+    };
+
+    if !current_is_plan {
+        clear_plan_mode_state(&state_path)?;
+        return Ok(PlanModeOutput {
+            success: true,
+            operation: String::from("exit"),
+            changed: false,
+            active: false,
+            managed: false,
+            message: String::from(
+                "Cleared stale EnterPlanMode state because plan mode was already changed outside the tool.",
+            ),
+            settings_path: settings_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            previous_local_mode: state.previous_local_mode,
+            current_local_mode,
+        });
+    }
+
+    if state.had_local_override {
+        if let Some(previous_local_mode) = state.previous_local_mode.clone() {
+            set_nested_value(
+                &mut document,
+                PERMISSION_DEFAULT_MODE_PATH,
+                previous_local_mode,
+            );
+        } else {
+            remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
+        }
+    } else {
+        remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
+    }
+    write_json_object(&settings_path, &document)?;
+    clear_plan_mode_state(&state_path)?;
+
+    Ok(PlanModeOutput {
+        success: true,
+        operation: String::from("exit"),
+        changed: true,
+        active: false,
+        managed: false,
+        message: String::from("Restored the prior worktree-local plan mode setting."),
+        settings_path: settings_path.display().to_string(),
+        state_path: state_path.display().to_string(),
+        previous_local_mode: state.previous_local_mode,
+        current_local_mode: get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned(),
+    })
+}
+
 fn execute_structured_output(
     input: StructuredOutputInput,
 ) -> Result<StructuredOutputResult, String> {
@@ -2902,6 +3108,72 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
     set_nested_value(map, rest, new_value);
 }
 
+fn remove_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str]) -> bool {
+    let Some((first, rest)) = path.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return root.remove(*first).is_some();
+    }
+
+    let mut should_remove_parent = false;
+    let removed = root.get_mut(*first).is_some_and(|entry| {
+        entry.as_object_mut().is_some_and(|map| {
+            let removed = remove_nested_value(map, rest);
+            should_remove_parent = removed && map.is_empty();
+            removed
+        })
+    });
+
+    if should_remove_parent {
+        root.remove(*first);
+    }
+
+    removed
+}
+
+fn plan_mode_state_file() -> Result<PathBuf, String> {
+    Ok(config_file_for_scope(ConfigScope::Settings)?
+        .parent()
+        .ok_or_else(|| String::from("settings.local.json has no parent directory"))?
+        .join("tool-state")
+        .join("plan-mode.json"))
+}
+
+fn read_plan_mode_state(path: &Path) -> Result<Option<PlanModeState>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            if contents.trim().is_empty() {
+                return Ok(None);
+            }
+            serde_json::from_str(&contents)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn write_plan_mode_state(path: &Path, state: &PlanModeState) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(state).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn clear_plan_mode_state(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn iso8601_timestamp() -> String {
     if let Ok(output) = Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -3190,6 +3462,8 @@ mod tests {
         assert!(names.contains(&"Sleep"));
         assert!(names.contains(&"SendUserMessage"));
         assert!(names.contains(&"Config"));
+        assert!(names.contains(&"EnterPlanMode"));
+        assert!(names.contains(&"ExitPlanMode"));
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
@@ -4372,6 +4646,140 @@ mod tests {
             execute_tool("Config", &json!({"setting": "nope"})).expect("unknown setting result");
         let unknown_output: serde_json::Value = serde_json::from_str(&unknown).expect("json");
         assert_eq!(unknown_output["success"], false);
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match original_config_home {
+            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
+            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enter_and_exit_plan_mode_round_trip_existing_local_override() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = std::env::temp_dir().join(format!(
+            "clawd-plan-mode-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let cwd = root.join("cwd");
+        std::fs::create_dir_all(home.join(".claw")).expect("home dir");
+        std::fs::create_dir_all(cwd.join(".claw")).expect("cwd dir");
+        std::fs::write(
+            cwd.join(".claw").join("settings.local.json"),
+            r#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
+        )
+        .expect("write local settings");
+
+        let original_home = std::env::var("HOME").ok();
+        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("CLAW_CONFIG_HOME");
+        std::env::set_current_dir(&cwd).expect("set cwd");
+
+        let enter = execute_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
+        let enter_output: serde_json::Value = serde_json::from_str(&enter).expect("json");
+        assert_eq!(enter_output["changed"], true);
+        assert_eq!(enter_output["managed"], true);
+        assert_eq!(enter_output["previousLocalMode"], "acceptEdits");
+        assert_eq!(enter_output["currentLocalMode"], "plan");
+
+        let local_settings = std::fs::read_to_string(cwd.join(".claw").join("settings.local.json"))
+            .expect("local settings after enter");
+        assert!(local_settings.contains(r#""defaultMode": "plan""#));
+        let state =
+            std::fs::read_to_string(cwd.join(".claw").join("tool-state").join("plan-mode.json"))
+                .expect("plan mode state");
+        assert!(state.contains(r#""hadLocalOverride": true"#));
+        assert!(state.contains(r#""previousLocalMode": "acceptEdits""#));
+
+        let exit = execute_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
+        let exit_output: serde_json::Value = serde_json::from_str(&exit).expect("json");
+        assert_eq!(exit_output["changed"], true);
+        assert_eq!(exit_output["managed"], false);
+        assert_eq!(exit_output["previousLocalMode"], "acceptEdits");
+        assert_eq!(exit_output["currentLocalMode"], "acceptEdits");
+
+        let local_settings = std::fs::read_to_string(cwd.join(".claw").join("settings.local.json"))
+            .expect("local settings after exit");
+        assert!(local_settings.contains(r#""defaultMode": "acceptEdits""#));
+        assert!(!cwd
+            .join(".claw")
+            .join("tool-state")
+            .join("plan-mode.json")
+            .exists());
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match original_config_home {
+            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
+            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exit_plan_mode_clears_override_when_enter_created_it_from_empty_local_state() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = std::env::temp_dir().join(format!(
+            "clawd-plan-mode-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let cwd = root.join("cwd");
+        std::fs::create_dir_all(home.join(".claw")).expect("home dir");
+        std::fs::create_dir_all(cwd.join(".claw")).expect("cwd dir");
+
+        let original_home = std::env::var("HOME").ok();
+        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("CLAW_CONFIG_HOME");
+        std::env::set_current_dir(&cwd).expect("set cwd");
+
+        let enter = execute_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
+        let enter_output: serde_json::Value = serde_json::from_str(&enter).expect("json");
+        assert_eq!(enter_output["previousLocalMode"], serde_json::Value::Null);
+        assert_eq!(enter_output["currentLocalMode"], "plan");
+
+        let exit = execute_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
+        let exit_output: serde_json::Value = serde_json::from_str(&exit).expect("json");
+        assert_eq!(exit_output["changed"], true);
+        assert_eq!(exit_output["currentLocalMode"], serde_json::Value::Null);
+
+        let local_settings = std::fs::read_to_string(cwd.join(".claw").join("settings.local.json"))
+            .expect("local settings after exit");
+        let local_settings_json: serde_json::Value =
+            serde_json::from_str(&local_settings).expect("valid settings json");
+        assert_eq!(
+            local_settings_json.get("permissions"),
+            None,
+            "permissions override should be removed on exit"
+        );
+        assert!(!cwd
+            .join(".claw")
+            .join("tool-state")
+            .join("plan-mode.json")
+            .exists());
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         match original_home {
