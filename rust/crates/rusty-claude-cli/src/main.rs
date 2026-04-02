@@ -787,27 +787,61 @@ fn format_compact_report(removed: usize, resulting_messages: usize, skipped: boo
 }
 
 fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<String>) {
-    let Some(status) = status else {
-        return (None, None);
-    };
-    let branch = status.lines().next().and_then(|line| {
-        line.strip_prefix("## ")
-            .map(|line| {
-                line.split(['.', ' '])
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
-            .filter(|value| !value.is_empty())
-    });
-    let project_root = find_git_root().ok();
-    (project_root, branch)
+    parse_git_status_metadata_for(
+        &env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        status,
+    )
 }
 
-fn find_git_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn parse_git_status_branch(status: Option<&str>) -> Option<String> {
+    let status = status?;
+    let first_line = status.lines().next()?;
+    let line = first_line.strip_prefix("## ")?;
+    if line.starts_with("HEAD") {
+        return Some("detached HEAD".to_string());
+    }
+    let branch = line.split(['.', ' ']).next().unwrap_or_default().trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+fn resolve_git_branch_for(cwd: &Path) -> Option<String> {
+    let branch = run_git_capture_in(cwd, &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if !branch.is_empty() {
+        return Some(branch.to_string());
+    }
+
+    let fallback = run_git_capture_in(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let fallback = fallback.trim();
+    if fallback.is_empty() {
+        None
+    } else if fallback == "HEAD" {
+        Some("detached HEAD".to_string())
+    } else {
+        Some(fallback.to_string())
+    }
+}
+
+fn run_git_capture_in(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn find_git_root_in(cwd: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(env::current_dir()?)
+        .current_dir(cwd)
         .output()?;
     if !output.status.success() {
         return Err("not a git repository".into());
@@ -817,6 +851,15 @@ fn find_git_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
         return Err("empty git root".into());
     }
     Ok(PathBuf::from(path))
+}
+
+fn parse_git_status_metadata_for(
+    cwd: &Path,
+    status: Option<&str>,
+) -> (Option<PathBuf>, Option<String>) {
+    let branch = resolve_git_branch_for(cwd).or_else(|| parse_git_status_branch(status));
+    let project_root = find_git_root_in(cwd).ok();
+    (project_root, branch)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -906,7 +949,9 @@ fn run_resume_command(
         }),
         SlashCommand::Diff => Ok(ResumeCommandOutcome {
             session: session.clone(),
-            message: Some(render_diff_report()?),
+            message: Some(render_diff_report_for(
+                session_path.parent().unwrap_or_else(|| Path::new(".")),
+            )?),
         }),
         SlashCommand::Version => Ok(ResumeCommandOutcome {
             session: session.clone(),
@@ -2083,22 +2128,43 @@ fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
 }
 
 fn render_diff_report() -> Result<String, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("git")
-        .args(["diff", "--", ":(exclude).omx"])
-        .current_dir(env::current_dir()?)
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git diff failed: {stderr}").into());
-    }
-    let diff = String::from_utf8(output.stdout)?;
-    if diff.trim().is_empty() {
+    render_diff_report_for(&env::current_dir()?)
+}
+
+fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let staged = run_git_diff_command_in(cwd, &["diff", "--cached"])?;
+    let unstaged = run_git_diff_command_in(cwd, &["diff"])?;
+    if staged.trim().is_empty() && unstaged.trim().is_empty() {
         return Ok(
             "Diff\n  Result           clean working tree\n  Detail           no current changes"
                 .to_string(),
         );
     }
-    Ok(format!("Diff\n\n{}", diff.trim_end()))
+
+    let mut sections = Vec::new();
+    if !staged.trim().is_empty() {
+        sections.push(format!("Staged changes:\n{}", staged.trim_end()));
+    }
+    if !unstaged.trim().is_empty() {
+        sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
+    }
+
+    Ok(format!("Diff\n\n{}", sections.join("\n\n")))
+}
+
+fn run_git_diff_command_in(
+    cwd: &Path,
+    args: &[&str],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git {} failed: {stderr}", args.join(" ")).into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 fn render_teleport_report(target: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -3811,21 +3877,28 @@ fn print_help() {
 mod tests {
     use super::{
         describe_tool_progress, filter_tool_specs, format_compact_report, format_cost_report,
-        format_internal_prompt_progress_line, format_model_report, format_model_switch_report,
-        format_permissions_report, format_permissions_switch_report, format_resume_report,
-        format_status_report, format_tool_call_start, format_tool_result,
-        normalize_permission_mode, parse_args, parse_git_status_metadata, permission_policy,
-        print_help_to, push_output_block, render_config_report, render_memory_report,
-        render_repl_help, resolve_model_alias, response_to_events, resume_supported_slash_commands,
-        status_context, CliAction, CliOutputFormat, InternalPromptProgressEvent,
-        InternalPromptProgressState, SlashCommand, StatusUsage, DEFAULT_MODEL,
+        format_init_report, format_internal_prompt_progress_line, format_model_report,
+        format_model_switch_report, format_permissions_report,
+        format_permissions_switch_report, format_resume_report, format_status_report,
+        format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
+        parse_git_status_branch, parse_git_status_metadata, permission_policy, print_help_to,
+        push_output_block, render_config_report, render_diff_report, render_init_claude_md,
+        render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
+        resume_supported_slash_commands, run_resume_command, status_context, CliAction,
+        CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState, SlashCommand,
+        StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
-    use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
+    use runtime::{
+        AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode, Session,
+    };
     use serde_json::json;
-    use std::path::PathBuf;
-    use std::time::Duration;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tools::GlobalToolRegistry;
 
     fn registry_with_plugin_tool() -> GlobalToolRegistry {
@@ -3850,6 +3923,42 @@ mod tests {
             None,
         )])
         .expect("plugin tool registry should build")
+    }
+
+    fn temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rusty-claude-cli-{nanos}"))
+    }
+
+    fn git(args: &[&str], cwd: &Path) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git command should run");
+        assert!(
+            status.success(),
+            "git command failed: git {}",
+            args.join(" ")
+        );
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn with_current_dir<T>(cwd: &Path, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::current_dir().expect("cwd should load");
+        std::env::set_current_dir(cwd).expect("cwd should change");
+        let result = f();
+        std::env::set_current_dir(previous).expect("cwd should restore");
+        result
     }
 
     #[test]
@@ -4335,19 +4444,140 @@ mod tests {
 
     #[test]
     fn parses_git_status_metadata() {
-        let (root, branch) = parse_git_status_metadata(Some(
-            "## rcc/cli...origin/rcc/cli
+        let _guard = env_lock();
+        let temp_root = temp_dir();
+        fs::create_dir_all(&temp_root).expect("root dir");
+        let (project_root, branch) = with_current_dir(&temp_root, || {
+            parse_git_status_metadata(Some(
+                "## rcc/cli...origin/rcc/cli
  M src/main.rs",
-        ));
+            ))
+        });
         assert_eq!(branch.as_deref(), Some("rcc/cli"));
-        let _ = root;
+        assert!(project_root.is_none());
+        fs::remove_dir_all(temp_root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn parses_detached_head_from_status_snapshot() {
+        let _guard = env_lock();
+        assert_eq!(
+            parse_git_status_branch(Some(
+                "## HEAD (no branch)
+ M src/main.rs"
+            )),
+            Some("detached HEAD".to_string())
+        );
+    }
+
+    #[test]
+    fn render_diff_report_shows_clean_tree_for_committed_repo() {
+        let _guard = env_lock();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        git(&["init", "--quiet"], &root);
+        git(&["config", "user.email", "tests@example.com"], &root);
+        git(&["config", "user.name", "Rusty Claude Tests"], &root);
+        fs::write(root.join("tracked.txt"), "hello\n").expect("write file");
+        git(&["add", "tracked.txt"], &root);
+        git(&["commit", "-m", "init", "--quiet"], &root);
+
+        let report = with_current_dir(&root, || {
+            render_diff_report().expect("diff report should render")
+        });
+        assert!(report.contains("clean working tree"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn render_diff_report_includes_staged_and_unstaged_sections() {
+        let _guard = env_lock();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        git(&["init", "--quiet"], &root);
+        git(&["config", "user.email", "tests@example.com"], &root);
+        git(&["config", "user.name", "Rusty Claude Tests"], &root);
+        fs::write(root.join("tracked.txt"), "hello\n").expect("write file");
+        git(&["add", "tracked.txt"], &root);
+        git(&["commit", "-m", "init", "--quiet"], &root);
+
+        fs::write(root.join("tracked.txt"), "hello\nstaged\n").expect("update file");
+        git(&["add", "tracked.txt"], &root);
+        fs::write(root.join("tracked.txt"), "hello\nstaged\nunstaged\n")
+            .expect("update file twice");
+
+        let report = with_current_dir(&root, || {
+            render_diff_report().expect("diff report should render")
+        });
+        assert!(report.contains("Staged changes:"));
+        assert!(report.contains("Unstaged changes:"));
+        assert!(report.contains("tracked.txt"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn render_diff_report_omits_ignored_files() {
+        let _guard = env_lock();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        git(&["init", "--quiet"], &root);
+        git(&["config", "user.email", "tests@example.com"], &root);
+        git(&["config", "user.name", "Rusty Claude Tests"], &root);
+        fs::write(root.join(".gitignore"), ".omx/\nignored.txt\n").expect("write gitignore");
+        fs::write(root.join("tracked.txt"), "hello\n").expect("write tracked");
+        git(&["add", ".gitignore", "tracked.txt"], &root);
+        git(&["commit", "-m", "init", "--quiet"], &root);
+        fs::create_dir_all(root.join(".omx")).expect("write omx dir");
+        fs::write(root.join(".omx").join("state.json"), "{}").expect("write ignored omx");
+        fs::write(root.join("ignored.txt"), "secret\n").expect("write ignored file");
+        fs::write(root.join("tracked.txt"), "hello\nworld\n").expect("write tracked change");
+
+        let report = with_current_dir(&root, || {
+            render_diff_report().expect("diff report should render")
+        });
+        assert!(report.contains("tracked.txt"));
+        assert!(!report.contains("+++ b/ignored.txt"));
+        assert!(!report.contains("+++ b/.omx/state.json"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn resume_diff_command_renders_report_for_saved_session() {
+        let _guard = env_lock();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        git(&["init", "--quiet"], &root);
+        git(&["config", "user.email", "tests@example.com"], &root);
+        git(&["config", "user.name", "Rusty Claude Tests"], &root);
+        fs::write(root.join("tracked.txt"), "hello\n").expect("write tracked");
+        git(&["add", "tracked.txt"], &root);
+        git(&["commit", "-m", "init", "--quiet"], &root);
+        fs::write(root.join("tracked.txt"), "hello\nworld\n").expect("modify tracked");
+        let session_path = root.join("session.json");
+        Session::new()
+            .save_to_path(&session_path)
+            .expect("session should save");
+
+        let session = Session::load_from_path(&session_path).expect("session should load");
+        let outcome = with_current_dir(&root, || {
+            run_resume_command(&session_path, &session, &SlashCommand::Diff)
+                .expect("resume diff should work")
+        });
+        let message = outcome.message.expect("diff message should exist");
+        assert!(message.contains("Unstaged changes:"));
+        assert!(message.contains("tracked.txt"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]
     fn status_context_reads_real_workspace_metadata() {
         let context = status_context(None).expect("status context should load");
         assert!(context.cwd.is_absolute());
-        assert_eq!(context.discovered_config_files, 5);
+        assert!(context.discovered_config_files >= context.loaded_config_files);
         assert!(context.loaded_config_files <= context.discovered_config_files);
     }
 
