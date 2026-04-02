@@ -225,7 +225,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "timeout": { "type": "integer", "minimum": 1 },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "type": "boolean" }
+                    "dangerouslyDisableSandbox": { "type": "boolean" },
+                    "namespaceRestrictions": { "type": "boolean" },
+                    "isolateNetwork": { "type": "boolean" },
+                    "filesystemMode": { "type": "string", "enum": ["off", "workspace-only", "allow-list"] },
+                    "allowedMounts": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["command"],
                 "additionalProperties": false

@@ -61,6 +61,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: true,
     },
     SlashCommandSpec {
+        name: "sandbox",
+        aliases: &[],
+        summary: "Show sandbox isolation status",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
         name: "compact",
         aliases: &[],
         summary: "Compact local session history",
@@ -229,6 +236,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 pub enum SlashCommand {
     Help,
     Status,
+    Sandbox,
     Compact,
     Bughunter {
         scope: Option<String>,
@@ -300,6 +308,7 @@ impl SlashCommand {
         Some(match command {
             "help" => Self::Help,
             "status" => Self::Status,
+            "sandbox" => Self::Sandbox,
             "compact" => Self::Compact,
             "bughunter" => Self::Bughunter {
                 scope: remainder_after_command(trimmed, command),
@@ -1188,6 +1197,7 @@ pub fn handle_slash_command(
         | SlashCommand::Ultraplan { .. }
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
+        | SlashCommand::Sandbox
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Clear { .. }
@@ -1287,6 +1297,7 @@ mod tests {
     fn parses_supported_slash_commands() {
         assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));
         assert_eq!(SlashCommand::parse(" /status "), Some(SlashCommand::Status));
+        assert_eq!(SlashCommand::parse("/sandbox"), Some(SlashCommand::Sandbox));
         assert_eq!(
             SlashCommand::parse("/bughunter runtime"),
             Some(SlashCommand::Bughunter {
@@ -1416,6 +1427,7 @@ mod tests {
         assert!(help.contains("works with --resume SESSION.json"));
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
+        assert!(help.contains("/sandbox"));
         assert!(help.contains("/compact"));
         assert!(help.contains("/bughunter [scope]"));
         assert!(help.contains("/commit"));
@@ -1436,14 +1448,15 @@ mod tests {
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
+        assert!(help.contains("/sandbox"));
         assert!(help.contains(
             "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 25);
-        assert_eq!(resume_supported_slash_commands().len(), 13);
+        assert_eq!(slash_command_specs().len(), 27);
+        assert_eq!(resume_supported_slash_commands().len(), 14);
     }
 
     #[test]
@@ -1490,6 +1503,7 @@ mod tests {
         let session = Session::new();
         assert!(handle_slash_command("/unknown", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command("/status", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/sandbox", &session, CompactionConfig::default()).is_none());
         assert!(
             handle_slash_command("/bughunter", &session, CompactionConfig::default()).is_none()
         );
