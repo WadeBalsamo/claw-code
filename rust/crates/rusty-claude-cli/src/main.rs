@@ -876,6 +876,7 @@ impl GitWorkspaceSummary {
     }
 }
 
+#[cfg(test)]
 fn format_unknown_slash_command_message(name: &str) -> String {
     let suggestions = suggest_slash_commands(name);
     if suggestions.is_empty() {
