@@ -85,7 +85,10 @@ pub use sandbox::{
     FilesystemIsolationMode, LinuxSandboxCommand, SandboxConfig, SandboxDetectionInputs,
     SandboxRequest, SandboxStatus,
 };
-pub use session::{ContentBlock, ConversationMessage, MessageRole, Session, SessionError};
+pub use session::{
+    ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction, SessionError,
+    SessionFork,
+};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };

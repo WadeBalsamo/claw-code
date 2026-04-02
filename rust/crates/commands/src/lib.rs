@@ -203,8 +203,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "session",
         aliases: &[],
-        summary: "List or switch managed local sessions",
-        argument_hint: Some("[list|switch <session-id>]"),
+        summary: "List, switch, or fork managed local sessions",
+        argument_hint: Some("[list|switch <session-id>|fork [branch-name]]"),
         resume_supported: false,
     },
     SlashCommandSpec {
@@ -398,7 +398,7 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
 pub fn render_slash_command_help() -> String {
     let mut lines = vec![
         "Slash commands".to_string(),
-        "  [resume] means the command also works with --resume SESSION.json".to_string(),
+        "  [resume] means the command also works with --resume SESSION.jsonl".to_string(),
     ];
     for spec in slash_command_specs() {
         let name = match spec.argument_hint {
@@ -1454,12 +1454,19 @@ mod tests {
                 target: Some("demo".to_string())
             })
         );
+        assert_eq!(
+            SlashCommand::parse("/session fork incident-review"),
+            Some(SlashCommand::Session {
+                action: Some("fork".to_string()),
+                target: Some("incident-review".to_string())
+            })
+        );
     }
 
     #[test]
     fn renders_help_from_shared_specs() {
         let help = render_slash_command_help();
-        assert!(help.contains("works with --resume SESSION.json"));
+        assert!(help.contains("works with --resume SESSION.jsonl"));
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
         assert!(help.contains("/sandbox"));
@@ -1482,7 +1489,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>]"));
+        assert!(help.contains("/session [list|switch <session-id>|fork [branch-name]]"));
         assert!(help.contains("/sandbox"));
         assert!(help.contains(
             "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
@@ -1496,19 +1503,17 @@ mod tests {
 
     #[test]
     fn compacts_sessions_via_slash_command() {
-        let session = Session {
-            version: 1,
-            messages: vec![
-                ConversationMessage::user_text("a ".repeat(200)),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "b ".repeat(200),
-                }]),
-                ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "recent".to_string(),
-                }]),
-            ],
-        };
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("a ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "b ".repeat(200),
+            }]),
+            ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "recent".to_string(),
+            }]),
+        ];
 
         let result = handle_slash_command(
             "/compact",
@@ -1588,6 +1593,12 @@ mod tests {
         assert!(handle_slash_command("/cost", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command(
             "/resume session.json",
+            &session,
+            CompactionConfig::default()
+        )
+        .is_none());
+        assert!(handle_slash_command(
+            "/resume session.jsonl",
             &session,
             CompactionConfig::default()
         )

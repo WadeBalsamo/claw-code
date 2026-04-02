@@ -13,7 +13,7 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
     resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
@@ -55,6 +55,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
+const LEGACY_SESSION_EXTENSION: &str = "json";
 
 type AllowedToolSet = BTreeSet<String>;
 
@@ -601,7 +603,19 @@ fn print_version() {
 }
 
 fn resume_session(session_path: &Path, commands: &[String]) {
-    let session = match Session::load_from_path(session_path) {
+    let resolved_path = if session_path.exists() {
+        session_path.to_path_buf()
+    } else {
+        match resolve_session_reference(&session_path.display().to_string()) {
+            Ok(handle) => handle.path,
+            Err(error) => {
+                eprintln!("failed to restore session: {error}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let session = match Session::load_from_path(&resolved_path) {
         Ok(session) => session,
         Err(error) => {
             eprintln!("failed to restore session: {error}");
@@ -612,7 +626,7 @@ fn resume_session(session_path: &Path, commands: &[String]) {
     if commands.is_empty() {
         println!(
             "Restored session from {} ({} messages).",
-            session_path.display(),
+            resolved_path.display(),
             session.messages.len()
         );
         return;
@@ -624,7 +638,7 @@ fn resume_session(session_path: &Path, commands: &[String]) {
             eprintln!("unsupported resumed command: {raw_command}");
             std::process::exit(2);
         };
-        match run_resume_command(session_path, &session, &command) {
+        match run_resume_command(&resolved_path, &session, &command) {
             Ok(ResumeCommandOutcome {
                 session: next_session,
                 message,
@@ -1069,6 +1083,8 @@ struct ManagedSessionSummary {
     path: PathBuf,
     modified_epoch_secs: u64,
     message_count: usize,
+    parent_session_id: Option<String>,
+    branch_name: Option<String>,
 }
 
 struct LiveCli {
@@ -1143,9 +1159,10 @@ impl LiveCli {
         permission_mode: PermissionMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let system_prompt = build_system_prompt()?;
-        let session = create_managed_session_handle()?;
+        let session_state = Session::new();
+        let session = create_managed_session_handle(&session_state.session_id)?;
         let runtime = build_runtime(
-            Session::new(),
+            session_state.with_persistence_path(session.path.clone()),
             model.clone(),
             system_prompt.clone(),
             enable_tools,
@@ -1539,9 +1556,10 @@ impl LiveCli {
             return Ok(false);
         }
 
-        self.session = create_managed_session_handle()?;
+        let session_state = Session::new();
+        self.session = create_managed_session_handle(&session_state.session_id)?;
         self.runtime = build_runtime(
-            Session::new(),
+            session_state.with_persistence_path(self.session.path.clone()),
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1576,6 +1594,7 @@ impl LiveCli {
         let handle = resolve_session_reference(&session_ref)?;
         let session = Session::load_from_path(&handle.path)?;
         let message_count = session.messages.len();
+        let session_id = session.session_id.clone();
         self.runtime = build_runtime(
             session,
             self.model.clone(),
@@ -1586,7 +1605,10 @@ impl LiveCli {
             self.permission_mode,
             None,
         )?;
-        self.session = handle;
+        self.session = SessionHandle {
+            id: session_id,
+            path: handle.path,
+        };
         println!(
             "{}",
             format_resume_report(
@@ -1661,6 +1683,7 @@ impl LiveCli {
                 let handle = resolve_session_reference(target)?;
                 let session = Session::load_from_path(&handle.path)?;
                 let message_count = session.messages.len();
+                let session_id = session.session_id.clone();
                 self.runtime = build_runtime(
                     session,
                     self.model.clone(),
@@ -1671,7 +1694,10 @@ impl LiveCli {
                     self.permission_mode,
                     None,
                 )?;
-                self.session = handle;
+                self.session = SessionHandle {
+                    id: session_id,
+                    path: handle.path,
+                };
                 println!(
                     "Session switched\n  Active session   {}\n  File             {}\n  Messages         {}",
                     self.session.id,
@@ -1680,8 +1706,42 @@ impl LiveCli {
                 );
                 Ok(true)
             }
+            Some("fork") => {
+                let forked = self.runtime.fork_session(target.map(ToOwned::to_owned));
+                let parent_session_id = self.session.id.clone();
+                let handle = create_managed_session_handle(&forked.session_id)?;
+                let branch_name = forked
+                    .fork
+                    .as_ref()
+                    .and_then(|fork| fork.branch_name.clone());
+                let forked = forked.with_persistence_path(handle.path.clone());
+                let message_count = forked.messages.len();
+                forked.save_to_path(&handle.path)?;
+                self.runtime = build_runtime(
+                    forked,
+                    self.model.clone(),
+                    self.system_prompt.clone(),
+                    true,
+                    true,
+                    self.allowed_tools.clone(),
+                    self.permission_mode,
+                    None,
+                )?;
+                self.session = handle;
+                println!(
+                    "Session forked\n  Parent session   {}\n  Active session   {}\n  Branch           {}\n  File             {}\n  Messages         {}",
+                    parent_session_id,
+                    self.session.id,
+                    branch_name.as_deref().unwrap_or("(unnamed)"),
+                    self.session.path.display(),
+                    message_count,
+                );
+                Ok(true)
+            }
             Some(other) => {
-                println!("Unknown /session action '{other}'. Use /session list or /session switch <session-id>.");
+                println!(
+                    "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, or /session fork [branch-name]."
+                );
                 Ok(false)
             }
         }
@@ -1922,36 +1982,53 @@ fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(path)
 }
 
-fn create_managed_session_handle() -> Result<SessionHandle, Box<dyn std::error::Error>> {
-    let id = generate_session_id();
-    let path = sessions_dir()?.join(format!("{id}.json"));
+fn create_managed_session_handle(
+    session_id: &str,
+) -> Result<SessionHandle, Box<dyn std::error::Error>> {
+    let id = session_id.to_string();
+    let path = sessions_dir()?.join(format!("{id}.{PRIMARY_SESSION_EXTENSION}"));
     Ok(SessionHandle { id, path })
-}
-
-fn generate_session_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("session-{millis}")
 }
 
 fn resolve_session_reference(reference: &str) -> Result<SessionHandle, Box<dyn std::error::Error>> {
     let direct = PathBuf::from(reference);
+    let looks_like_path = direct.extension().is_some() || direct.components().count() > 1;
     let path = if direct.exists() {
         direct
-    } else {
-        sessions_dir()?.join(format!("{reference}.json"))
-    };
-    if !path.exists() {
+    } else if looks_like_path {
         return Err(format!("session not found: {reference}").into());
-    }
+    } else {
+        resolve_managed_session_path(reference)?
+    };
     let id = path
-        .file_stem()
+        .file_name()
         .and_then(|value| value.to_str())
+        .and_then(|name| {
+            name.strip_suffix(&format!(".{PRIMARY_SESSION_EXTENSION}"))
+                .or_else(|| name.strip_suffix(&format!(".{LEGACY_SESSION_EXTENSION}")))
+        })
         .unwrap_or(reference)
         .to_string();
     Ok(SessionHandle { id, path })
+}
+
+fn resolve_managed_session_path(session_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let directory = sessions_dir()?;
+    for extension in [PRIMARY_SESSION_EXTENSION, LEGACY_SESSION_EXTENSION] {
+        let path = directory.join(format!("{session_id}.{extension}"));
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    Err(format!("session not found: {session_id}").into())
+}
+
+fn is_managed_session_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|extension| {
+            extension == PRIMARY_SESSION_EXTENSION || extension == LEGACY_SESSION_EXTENSION
+        })
 }
 
 fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
@@ -1959,7 +2036,7 @@ fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::er
     for entry in fs::read_dir(sessions_dir()?)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        if !is_managed_session_file(&path) {
             continue;
         }
         let metadata = entry.metadata()?;
@@ -1969,19 +2046,41 @@ fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::er
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_secs())
             .unwrap_or_default();
-        let message_count = Session::load_from_path(&path)
-            .map(|session| session.messages.len())
-            .unwrap_or_default();
-        let id = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let (id, message_count, parent_session_id, branch_name) = Session::load_from_path(&path)
+            .map(|session| {
+                let parent_session_id = session
+                    .fork
+                    .as_ref()
+                    .map(|fork| fork.parent_session_id.clone());
+                let branch_name = session
+                    .fork
+                    .as_ref()
+                    .and_then(|fork| fork.branch_name.clone());
+                (
+                    session.session_id,
+                    session.messages.len(),
+                    parent_session_id,
+                    branch_name,
+                )
+            })
+            .unwrap_or_else(|_| {
+                (
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    0,
+                    None,
+                    None,
+                )
+            });
         sessions.push(ManagedSessionSummary {
             id,
             path,
             modified_epoch_secs,
             message_count,
+            parent_session_id,
+            branch_name,
         });
     }
     sessions.sort_by(|left, right| right.modified_epoch_secs.cmp(&left.modified_epoch_secs));
@@ -2004,11 +2103,23 @@ fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::e
         } else {
             "○ saved"
         };
+        let lineage = match (
+            session.branch_name.as_deref(),
+            session.parent_session_id.as_deref(),
+        ) {
+            (Some(branch_name), Some(parent_session_id)) => {
+                format!(" branch={branch_name} from={parent_session_id}")
+            }
+            (None, Some(parent_session_id)) => format!(" from={parent_session_id}"),
+            (Some(branch_name), None) => format!(" branch={branch_name}"),
+            (None, None) => String::new(),
+        };
         lines.push(format!(
-            "  {id:<20} {marker:<10} msgs={msgs:<4} modified={modified} path={path}",
+            "  {id:<20} {marker:<10} msgs={msgs:<4} modified={modified}{lineage} path={path}",
             id = session.id,
             msgs = session.message_count,
             modified = session.modified_epoch_secs,
+            lineage = lineage,
             path = session.path.display(),
         ));
     }
@@ -4009,7 +4120,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "      Shorthand non-interactive prompt mode")?;
     writeln!(
         out,
-        "  claw --resume SESSION.json [/status] [/compact] [...]"
+        "  claw --resume SESSION.jsonl [/status] [/compact] [...]"
     )?;
     writeln!(
         out,
@@ -4071,7 +4182,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  claw --resume session.json /status /diff /export notes.txt"
+        "  claw --resume session.jsonl /status /diff /export notes.txt"
     )?;
     writeln!(out, "  claw agents")?;
     writeln!(out, "  claw /skills")?;
@@ -4098,6 +4209,7 @@ mod tests {
         resume_supported_slash_commands, run_resume_command, status_context, CliAction,
         CliOutputFormat, HookAbortMonitor, InternalPromptProgressEvent,
         InternalPromptProgressState, SlashCommand, StatusUsage, DEFAULT_MODEL,
+        create_managed_session_handle, resolve_session_reference,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
@@ -4383,13 +4495,13 @@ mod tests {
     fn parses_resume_flag_with_slash_command() {
         let args = vec![
             "--resume".to_string(),
-            "session.json".to_string(),
+            "session.jsonl".to_string(),
             "/compact".to_string(),
         ];
         assert_eq!(
             parse_args(&args).expect("args should parse"),
             CliAction::ResumeSession {
-                session_path: PathBuf::from("session.json"),
+                session_path: PathBuf::from("session.jsonl"),
                 commands: vec!["/compact".to_string()],
             }
         );
@@ -4399,7 +4511,7 @@ mod tests {
     fn parses_resume_flag_with_multiple_slash_commands() {
         let args = vec![
             "--resume".to_string(),
-            "session.json".to_string(),
+            "session.jsonl".to_string(),
             "/status".to_string(),
             "/compact".to_string(),
             "/cost".to_string(),
@@ -4407,7 +4519,7 @@ mod tests {
         assert_eq!(
             parse_args(&args).expect("args should parse"),
             CliAction::ResumeSession {
-                session_path: PathBuf::from("session.json"),
+                session_path: PathBuf::from("session.jsonl"),
                 commands: vec![
                     "/status".to_string(),
                     "/compact".to_string(),
@@ -4453,7 +4565,7 @@ mod tests {
     fn shared_help_uses_resume_annotation_copy() {
         let help = commands::render_slash_command_help();
         assert!(help.contains("Slash commands"));
-        assert!(help.contains("works with --resume SESSION.json"));
+        assert!(help.contains("works with --resume SESSION.jsonl"));
     }
 
     #[test]
@@ -4474,7 +4586,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>]"));
+        assert!(help.contains("/session [list|switch <session-id>|fork [branch-name]]"));
         assert!(help.contains(
             "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
@@ -4501,9 +4613,9 @@ mod tests {
 
     #[test]
     fn resume_report_uses_sectioned_layout() {
-        let report = format_resume_report("session.json", 14, 6);
+        let report = format_resume_report("session.jsonl", 14, 6);
         assert!(report.contains("Session resumed"));
-        assert!(report.contains("Session file     session.json"));
+        assert!(report.contains("Session file     session.jsonl"));
         assert!(report.contains("Messages         14"));
         assert!(report.contains("Turns            6"));
     }
@@ -4608,7 +4720,7 @@ mod tests {
             "workspace-write",
             &super::StatusContext {
                 cwd: PathBuf::from("/tmp/project"),
-                session_path: Some(PathBuf::from("session.json")),
+                session_path: Some(PathBuf::from("session.jsonl")),
                 loaded_config_files: 2,
                 discovered_config_files: 3,
                 memory_file_count: 4,
@@ -4626,7 +4738,7 @@ mod tests {
         assert!(status.contains("Cwd              /tmp/project"));
         assert!(status.contains("Project root     /tmp"));
         assert!(status.contains("Git branch       main"));
-        assert!(status.contains("Session          session.json"));
+        assert!(status.contains("Session          session.jsonl"));
         assert!(status.contains("Config files     loaded 2/3"));
         assert!(status.contains("Memory files     4"));
     }
@@ -4825,9 +4937,9 @@ mod tests {
     #[test]
     fn parses_resume_and_config_slash_commands() {
         assert_eq!(
-            SlashCommand::parse("/resume saved-session.json"),
+            SlashCommand::parse("/resume saved-session.jsonl"),
             Some(SlashCommand::Resume {
-                session_path: Some("saved-session.json".to_string())
+                session_path: Some("saved-session.jsonl".to_string())
             })
         );
         assert_eq!(
@@ -4846,6 +4958,65 @@ mod tests {
         );
         assert_eq!(SlashCommand::parse("/memory"), Some(SlashCommand::Memory));
         assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
+        assert_eq!(
+            SlashCommand::parse("/session fork incident-review"),
+            Some(SlashCommand::Session {
+                action: Some("fork".to_string()),
+                target: Some("incident-review".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn help_mentions_jsonl_resume_examples() {
+        let mut help = Vec::new();
+        print_help_to(&mut help).expect("help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+        assert!(help.contains("claw --resume SESSION.jsonl"));
+        assert!(help.contains("claw --resume session.jsonl /status /diff /export notes.txt"));
+    }
+
+    #[test]
+    fn managed_sessions_default_to_jsonl_and_resolve_legacy_json() {
+        let _guard = cwd_lock().lock().expect("cwd lock");
+        let workspace = temp_workspace("session-resolution");
+        std::fs::create_dir_all(&workspace).expect("workspace should create");
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&workspace).expect("switch cwd");
+
+        let handle = create_managed_session_handle("session-alpha").expect("jsonl handle");
+        assert!(handle.path.ends_with("session-alpha.jsonl"));
+
+        let legacy_path = workspace.join(".claude/sessions/legacy.json");
+        std::fs::create_dir_all(
+            legacy_path
+                .parent()
+                .expect("legacy path should have parent directory"),
+        )
+        .expect("session dir should exist");
+        Session::new()
+            .with_persistence_path(legacy_path.clone())
+            .save_to_path(&legacy_path)
+            .expect("legacy session should save");
+
+        let resolved = resolve_session_reference("legacy").expect("legacy session should resolve");
+        assert_eq!(resolved.path, legacy_path);
+
+        std::env::set_current_dir(previous).expect("restore cwd");
+        std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+    }
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_workspace(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("claw-cli-{label}-{nanos}"))
     }
 
     #[test]
