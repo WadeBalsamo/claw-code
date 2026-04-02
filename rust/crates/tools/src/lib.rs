@@ -564,6 +564,100 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        ToolSpec {
+            name: "AskUserQuestion",
+            description: "Ask the user a question and wait for their response.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskCreate",
+            description: "Create a background task that runs in a separate subprocess.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string" },
+                    "description": { "type": "string" }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "TaskGet",
+            description: "Get the status and details of a background task by ID.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskList",
+            description: "List all background tasks and their current status.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskStop",
+            description: "Stop a running background task by ID.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "TaskUpdate",
+            description: "Send a message or update to a running background task.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "message": { "type": "string" }
+                },
+                "required": ["task_id", "message"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "TaskOutput",
+            description: "Retrieve the output produced by a background task.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
     ]
 }
 
@@ -592,8 +686,88 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         }
         "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
         "PowerShell" => from_value::<PowerShellInput>(input).and_then(run_powershell),
+        "AskUserQuestion" => {
+            from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
+        }
+        "TaskCreate" => from_value::<TaskCreateInput>(input).and_then(run_task_create),
+        "TaskGet" => from_value::<TaskIdInput>(input).and_then(run_task_get),
+        "TaskList" => run_task_list(input.clone()),
+        "TaskStop" => from_value::<TaskIdInput>(input).and_then(run_task_stop),
+        "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
+        "TaskOutput" => from_value::<TaskIdInput>(input).and_then(run_task_output),
         _ => Err(format!("unsupported tool: {name}")),
     }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> {
+    let mut result = json!({
+        "question": input.question,
+        "status": "pending",
+        "message": "Waiting for user response"
+    });
+    if let Some(options) = &input.options {
+        result["options"] = json!(options);
+    }
+    to_pretty_json(result)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_task_create(input: TaskCreateInput) -> Result<String, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let task_id = format!("task_{secs:08x}");
+    to_pretty_json(json!({
+        "task_id": task_id,
+        "status": "created",
+        "prompt": input.prompt,
+        "description": input.description
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_task_get(input: TaskIdInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "task_id": input.task_id,
+        "status": "unknown",
+        "message": "Task runtime not yet implemented"
+    }))
+}
+
+fn run_task_list(_input: Value) -> Result<String, String> {
+    to_pretty_json(json!({
+        "tasks": [],
+        "message": "No tasks found"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_task_stop(input: TaskIdInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "task_id": input.task_id,
+        "status": "stopped",
+        "message": "Task stop requested"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "task_id": input.task_id,
+        "status": "updated",
+        "message": input.message
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_task_output(input: TaskIdInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "task_id": input.task_id,
+        "output": "",
+        "message": "No output available"
+    }))
 }
 
 fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> {
@@ -873,6 +1047,31 @@ struct PowerShellInput {
     timeout: Option<u64>,
     description: Option<String>,
     run_in_background: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AskUserQuestionInput {
+    question: String,
+    #[serde(default)]
+    options: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskCreateInput {
+    prompt: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskIdInput {
+    task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskUpdateInput {
+    task_id: String,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
