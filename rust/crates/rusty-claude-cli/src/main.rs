@@ -400,7 +400,7 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
         return None;
     }
     let slash_command = slash_command_specs()
-        .into_iter()
+        .iter()
         .find(|spec| spec.name == command_name)?;
     let guidance = if slash_command.resume_supported {
         format!(
@@ -655,7 +655,7 @@ fn parse_resume_args(args: &[String]) -> Result<CliAction, String> {
             if !current_command.is_empty() {
                 commands.push(current_command);
             }
-            current_command = token.clone();
+            current_command = String::from(token.as_str());
             continue;
         }
 
@@ -4913,13 +4913,12 @@ mod tests {
         format_model_report, format_model_switch_report, format_permissions_report,
         format_permissions_switch_report, format_resume_report, format_status_report,
         format_tool_call_start, format_tool_result, format_unknown_slash_command,
-        format_unknown_slash_command_message,
-        normalize_permission_mode, parse_args, parse_git_status_branch,
-        parse_git_status_metadata_for, parse_git_workspace_summary, permission_policy,
-        print_help_to, push_output_block, render_config_report, render_diff_report,
-        render_memory_report, render_repl_help, resolve_model_alias, resolve_session_reference,
-        render_resume_usage, response_to_events, resume_supported_slash_commands,
-        run_resume_command,
+        format_unknown_slash_command_message, normalize_permission_mode, parse_args,
+        parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
+        permission_policy, print_help_to, push_output_block, render_config_report,
+        render_diff_report, render_memory_report, render_repl_help, render_resume_usage,
+        resolve_model_alias, resolve_session_reference, response_to_events,
+        resume_supported_slash_commands, run_resume_command,
         slash_command_completion_candidates_with_sessions, status_context, CliAction,
         CliOutputFormat, GitWorkspaceSummary, InternalPromptProgressEvent,
         InternalPromptProgressState, LiveCli, SlashCommand, StatusUsage, DEFAULT_MODEL,
@@ -5452,6 +5451,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires ANTHROPIC_API_KEY"]
     fn startup_banner_mentions_workflow_completions() {
         let _guard = env_lock();
         let root = temp_dir();
