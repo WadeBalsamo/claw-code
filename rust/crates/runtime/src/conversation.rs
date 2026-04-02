@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
-use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
@@ -114,6 +113,7 @@ pub struct ConversationRuntime<C, T> {
     auto_compaction_input_tokens_threshold: u32,
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
+    session_tracer: Option<SessionTracer>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -162,6 +162,7 @@ where
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
+            session_tracer: None,
         }
     }
 
@@ -189,6 +190,12 @@ where
         hook_progress_reporter: Box<dyn HookProgressReporter>,
     ) -> Self {
         self.hook_progress_reporter = Some(hook_progress_reporter);
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
+        self.session_tracer = Some(session_tracer);
         self
     }
 
@@ -272,7 +279,7 @@ where
         let user_input = user_input.into();
         self.record_turn_started(&user_input);
         self.session
-            .push_user_text(user_input.into())
+            .push_user_text(user_input)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
 
         let mut assistant_messages = Vec::new();
@@ -488,6 +495,24 @@ where
             removed_message_count: result.removed_message_count,
         })
     }
+
+    fn record_turn_started(&self, _user_input: &str) {}
+
+    fn record_assistant_iteration(
+        &self,
+        _iteration: usize,
+        _assistant_message: &ConversationMessage,
+        _pending_tool_use_count: usize,
+    ) {
+    }
+
+    fn record_tool_started(&self, _iteration: usize, _tool_name: &str) {}
+
+    fn record_tool_finished(&self, _iteration: usize, _result_message: &ConversationMessage) {}
+
+    fn record_turn_completed(&self, _summary: &TurnSummary) {}
+
+    fn record_turn_failed(&self, _iteration: usize, _error: &RuntimeError) {}
 }
 
 #[must_use]

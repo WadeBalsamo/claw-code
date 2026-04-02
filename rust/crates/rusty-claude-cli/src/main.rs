@@ -1165,6 +1165,7 @@ impl LiveCli {
         let session = create_managed_session_handle(&session_state.session_id)?;
         let runtime = build_runtime(
             session_state.with_persistence_path(session.path.clone()),
+            &session.id,
             model.clone(),
             system_prompt.clone(),
             enable_tools,
@@ -1223,6 +1224,7 @@ impl LiveCli {
         let hook_abort_signal = runtime::HookAbortSignal::new();
         let runtime = build_runtime(
             self.runtime.session().clone(),
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1564,6 +1566,7 @@ impl LiveCli {
         self.session = create_managed_session_handle(&session_state.session_id)?;
         self.runtime = build_runtime(
             session_state.with_persistence_path(self.session.path.clone()),
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1725,6 +1728,7 @@ impl LiveCli {
                 forked.save_to_path(&handle.path)?;
                 self.runtime = build_runtime(
                     forked,
+                    &handle.id,
                     self.model.clone(),
                     self.system_prompt.clone(),
                     true,
@@ -1773,6 +1777,7 @@ impl LiveCli {
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.runtime = build_runtime(
             self.runtime.session().clone(),
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -1814,6 +1819,7 @@ impl LiveCli {
         let session = self.runtime.session().clone();
         let mut runtime = build_runtime(
             session,
+            &self.session.id,
             self.model.clone(),
             self.system_prompt.clone(),
             enable_tools,
@@ -3157,7 +3163,7 @@ fn build_runtime(
         CliToolExecutor::new(allowed_tools.clone(), emit_output, tool_registry.clone()),
         permission_policy(permission_mode, &feature_config, &tool_registry),
         system_prompt,
-        feature_config,
+        &feature_config,
     );
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));

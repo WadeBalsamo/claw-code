@@ -6,6 +6,7 @@ use runtime::{
     OAuthTokenExchangeRequest,
 };
 use serde::Deserialize;
+use telemetry::SessionTracer;
 
 use crate::error::ApiError;
 
@@ -191,6 +192,11 @@ impl AnthropicClient {
         self.max_retries = max_retries;
         self.initial_backoff = initial_backoff;
         self.max_backoff = max_backoff;
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_tracer(self, _session_tracer: SessionTracer) -> Self {
         self
     }
 
