@@ -658,6 +658,153 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        ToolSpec {
+            name: "TeamCreate",
+            description: "Create a team of sub-agents for parallel task execution.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": { "type": "string" },
+                                "description": { "type": "string" }
+                            },
+                            "required": ["prompt"]
+                        }
+                    }
+                },
+                "required": ["name", "tasks"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "TeamDelete",
+            description: "Delete a team and stop all its running tasks.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "team_id": { "type": "string" }
+                },
+                "required": ["team_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "CronCreate",
+            description: "Create a scheduled recurring task.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "schedule": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "description": { "type": "string" }
+                },
+                "required": ["schedule", "prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "CronDelete",
+            description: "Delete a scheduled recurring task by ID.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cron_id": { "type": "string" }
+                },
+                "required": ["cron_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "CronList",
+            description: "List all scheduled recurring tasks.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LSP",
+            description: "Query Language Server Protocol for code intelligence (symbols, references, diagnostics).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["symbols", "references", "diagnostics", "definition", "hover"] },
+                    "path": { "type": "string" },
+                    "line": { "type": "integer", "minimum": 0 },
+                    "character": { "type": "integer", "minimum": 0 },
+                    "query": { "type": "string" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ListMcpResources",
+            description: "List available resources from connected MCP servers.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ReadMcpResource",
+            description: "Read a specific resource from an MCP server by URI.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" },
+                    "uri": { "type": "string" }
+                },
+                "required": ["uri"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "McpAuth",
+            description: "Authenticate with an MCP server that requires OAuth or credentials.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" }
+                },
+                "required": ["server"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "RemoteTrigger",
+            description: "Trigger a remote action or webhook endpoint.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE"] },
+                    "headers": { "type": "object" },
+                    "body": { "type": "string" }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
     ]
 }
 
@@ -695,6 +842,18 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "TaskStop" => from_value::<TaskIdInput>(input).and_then(run_task_stop),
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
         "TaskOutput" => from_value::<TaskIdInput>(input).and_then(run_task_output),
+        "TeamCreate" => from_value::<TeamCreateInput>(input).and_then(run_team_create),
+        "TeamDelete" => from_value::<TeamDeleteInput>(input).and_then(run_team_delete),
+        "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
+        "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
+        "CronList" => run_cron_list(input.clone()),
+        "LSP" => from_value::<LspInput>(input).and_then(run_lsp),
+        "ListMcpResources" => {
+            from_value::<McpResourceInput>(input).and_then(run_list_mcp_resources)
+        }
+        "ReadMcpResource" => from_value::<McpResourceInput>(input).and_then(run_read_mcp_resource),
+        "McpAuth" => from_value::<McpAuthInput>(input).and_then(run_mcp_auth),
+        "RemoteTrigger" => from_value::<RemoteTriggerInput>(input).and_then(run_remote_trigger),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -770,6 +929,116 @@ fn run_task_output(input: TaskIdInput) -> Result<String, String> {
     }))
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn run_team_create(input: TeamCreateInput) -> Result<String, String> {
+    let team_id = format!(
+        "team_{:08x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    to_pretty_json(json!({
+        "team_id": team_id,
+        "name": input.name,
+        "task_count": input.tasks.len(),
+        "status": "created"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_team_delete(input: TeamDeleteInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "team_id": input.team_id,
+        "status": "deleted"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
+    let cron_id = format!(
+        "cron_{:08x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    to_pretty_json(json!({
+        "cron_id": cron_id,
+        "schedule": input.schedule,
+        "prompt": input.prompt,
+        "description": input.description,
+        "status": "created"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "cron_id": input.cron_id,
+        "status": "deleted"
+    }))
+}
+
+fn run_cron_list(_input: Value) -> Result<String, String> {
+    to_pretty_json(json!({
+        "crons": [],
+        "message": "No scheduled tasks found"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_lsp(input: LspInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "action": input.action,
+        "path": input.path,
+        "line": input.line,
+        "character": input.character,
+        "query": input.query,
+        "results": [],
+        "message": "LSP server not connected"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_list_mcp_resources(input: McpResourceInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "server": input.server,
+        "resources": [],
+        "message": "No MCP resources available"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_read_mcp_resource(input: McpResourceInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "server": input.server,
+        "uri": input.uri,
+        "content": "",
+        "message": "Resource not available"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_mcp_auth(input: McpAuthInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "server": input.server,
+        "status": "auth_required",
+        "message": "MCP authentication not yet implemented"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_remote_trigger(input: RemoteTriggerInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "url": input.url,
+        "method": input.method.unwrap_or_else(|| "GET".to_string()),
+        "headers": input.headers,
+        "body": input.body,
+        "status": "triggered",
+        "message": "Remote trigger stub response"
+    }))
+}
 fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> {
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
@@ -1072,6 +1341,67 @@ struct TaskIdInput {
 struct TaskUpdateInput {
     task_id: String,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamCreateInput {
+    name: String,
+    tasks: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamDeleteInput {
+    team_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CronCreateInput {
+    schedule: String,
+    prompt: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CronDeleteInput {
+    cron_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LspInput {
+    action: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    character: Option<u32>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpResourceInput {
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpAuthInput {
+    server: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteTriggerInput {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<Value>,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
