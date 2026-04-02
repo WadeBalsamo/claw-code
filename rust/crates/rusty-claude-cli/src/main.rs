@@ -30,9 +30,9 @@ use api::{
 };
 
 use commands::{
-    handle_agents_slash_command, handle_plugins_slash_command, handle_skills_slash_command,
-    render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
-    validate_slash_command_input, SlashCommand,
+    handle_agents_slash_command, handle_mcp_slash_command, handle_plugins_slash_command,
+    handle_skills_slash_command, render_slash_command_help, resume_supported_slash_commands,
+    slash_command_specs, validate_slash_command_input, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
@@ -107,6 +107,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::DumpManifests => dump_manifests(),
         CliAction::BootstrapPlan => print_bootstrap_plan(),
         CliAction::Agents { args } => LiveCli::print_agents(args.as_deref())?,
+        CliAction::Mcp { args } => LiveCli::print_mcp(args.as_deref())?,
         CliAction::Skills { args } => LiveCli::print_skills(args.as_deref())?,
         CliAction::PrintSystemPrompt { cwd, date } => print_system_prompt(cwd, date),
         CliAction::Version => print_version(),
@@ -145,6 +146,9 @@ enum CliAction {
     DumpManifests,
     BootstrapPlan,
     Agents {
+        args: Option<String>,
+    },
+    Mcp {
         args: Option<String>,
     },
     Skills {
@@ -342,6 +346,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
         }),
+        "mcp" => Ok(CliAction::Mcp {
+            args: join_optional_args(&rest[1..]),
+        }),
         "skills" => Ok(CliAction::Skills {
             args: join_optional_args(&rest[1..]),
         }),
@@ -400,6 +407,7 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
         "dump-manifests"
             | "bootstrap-plan"
             | "agents"
+            | "mcp"
             | "skills"
             | "system-prompt"
             | "login"
@@ -435,6 +443,14 @@ fn parse_direct_slash_cli_action(rest: &[String]) -> Result<CliAction, String> {
     match SlashCommand::parse(&raw) {
         Ok(Some(SlashCommand::Help)) => Ok(CliAction::Help),
         Ok(Some(SlashCommand::Agents { args })) => Ok(CliAction::Agents { args }),
+        Ok(Some(SlashCommand::Mcp { action, target })) => Ok(CliAction::Mcp {
+            args: match (action, target) {
+                (None, None) => None,
+                (Some(action), None) => Some(action),
+                (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                (None, Some(target)) => Some(target),
+            },
+        }),
         Ok(Some(SlashCommand::Skills { args })) => Ok(CliAction::Skills { args }),
         Ok(Some(SlashCommand::Unknown(name))) => Err(format_unknown_direct_slash_command(&name)),
         Ok(Some(command)) => Err({
@@ -1353,6 +1369,19 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_config_report(section.as_deref())?),
         }),
+        SlashCommand::Mcp { action, target } => {
+            let cwd = env::current_dir()?;
+            let args = match (action.as_deref(), target.as_deref()) {
+                (None, None) => None,
+                (Some(action), None) => Some(action.to_string()),
+                (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                (None, Some(target)) => Some(target.to_string()),
+            };
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(handle_mcp_slash_command(args.as_deref(), &cwd)?),
+            })
+        }
         SlashCommand::Memory => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(render_memory_report()?),
@@ -1870,6 +1899,16 @@ impl LiveCli {
                 Self::print_config(section.as_deref())?;
                 false
             }
+            SlashCommand::Mcp { action, target } => {
+                let args = match (action.as_deref(), target.as_deref()) {
+                    (None, None) => None,
+                    (Some(action), None) => Some(action.to_string()),
+                    (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                    (None, Some(target)) => Some(target.to_string()),
+                };
+                Self::print_mcp(args.as_deref())?;
+                false
+            }
             SlashCommand::Memory => {
                 Self::print_memory()?;
                 false
@@ -2132,6 +2171,12 @@ impl LiveCli {
     fn print_agents(args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
         println!("{}", handle_agents_slash_command(args, &cwd)?);
+        Ok(())
+    }
+
+    fn print_mcp(args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        println!("{}", handle_mcp_slash_command(args, &cwd)?);
         Ok(())
     }
 
@@ -4192,6 +4237,9 @@ fn slash_command_completion_candidates_with_sessions(
         "/config hooks",
         "/config model",
         "/config plugins",
+        "/mcp ",
+        "/mcp list",
+        "/mcp show ",
         "/export ",
         "/issue ",
         "/model ",
@@ -4217,6 +4265,7 @@ fn slash_command_completion_candidates_with_sessions(
         "/teleport ",
         "/ultraplan ",
         "/agents help",
+        "/mcp help",
         "/skills help",
     ] {
         completions.insert(candidate.to_string());
@@ -4907,6 +4956,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw dump-manifests")?;
     writeln!(out, "  claw bootstrap-plan")?;
     writeln!(out, "  claw agents")?;
+    writeln!(out, "  claw mcp")?;
     writeln!(out, "  claw skills")?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
     writeln!(out, "  claw login")?;
@@ -4978,6 +5028,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  claw --resume {LATEST_SESSION_REFERENCE} /status /diff /export notes.txt"
     )?;
     writeln!(out, "  claw agents")?;
+    writeln!(out, "  claw mcp show my-server")?;
     writeln!(out, "  claw /skills")?;
     writeln!(out, "  claw login")?;
     writeln!(out, "  claw init")?;
@@ -5298,6 +5349,10 @@ mod tests {
             CliAction::Agents { args: None }
         );
         assert_eq!(
+            parse_args(&["mcp".to_string()]).expect("mcp should parse"),
+            CliAction::Mcp { args: None }
+        );
+        assert_eq!(
             parse_args(&["skills".to_string()]).expect("skills should parse"),
             CliAction::Skills { args: None }
         );
@@ -5356,10 +5411,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_direct_agents_and_skills_slash_commands() {
+    fn parses_direct_agents_mcp_and_skills_slash_commands() {
         assert_eq!(
             parse_args(&["/agents".to_string()]).expect("/agents should parse"),
             CliAction::Agents { args: None }
+        );
+        assert_eq!(
+            parse_args(&["/mcp".to_string(), "show".to_string(), "demo".to_string()])
+                .expect("/mcp show demo should parse"),
+            CliAction::Mcp {
+                args: Some("show demo".to_string())
+            }
         );
         assert_eq!(
             parse_args(&["/skills".to_string()]).expect("/skills should parse"),
@@ -5578,6 +5640,7 @@ mod tests {
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));
         assert!(help.contains("/config [env|hooks|model|plugins]"));
+        assert!(help.contains("/mcp [list|show <server>|help]"));
         assert!(help.contains("/memory"));
         assert!(help.contains("/init"));
         assert!(help.contains("/diff"));
@@ -5608,6 +5671,7 @@ mod tests {
         assert!(completions.contains(&"/session list".to_string()));
         assert!(completions.contains(&"/session switch session-current".to_string()));
         assert!(completions.contains(&"/resume session-old".to_string()));
+        assert!(completions.contains(&"/mcp list".to_string()));
         assert!(completions.contains(&"/ultraplan ".to_string()));
     }
 
@@ -5644,7 +5708,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "sandbox", "compact", "clear", "cost", "config", "memory",
+                "help", "status", "sandbox", "compact", "clear", "cost", "config", "mcp", "memory",
                 "init", "diff", "version", "export", "agents", "skills",
             ]
         );
@@ -5717,6 +5781,7 @@ mod tests {
         assert!(help.contains("claw sandbox"));
         assert!(help.contains("claw init"));
         assert!(help.contains("claw agents"));
+        assert!(help.contains("claw mcp"));
         assert!(help.contains("claw skills"));
         assert!(help.contains("claw /skills"));
     }
