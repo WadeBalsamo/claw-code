@@ -1381,12 +1381,12 @@ fn run_resume_command(
         }
         SlashCommand::Unknown(name) => Err(format_unknown_slash_command(name).into()),
         SlashCommand::Bughunter { .. }
-        | SlashCommand::Commit
+        | SlashCommand::Commit { .. }
         | SlashCommand::Pr { .. }
         | SlashCommand::Issue { .. }
         | SlashCommand::Ultraplan { .. }
         | SlashCommand::Teleport { .. }
-        | SlashCommand::DebugToolCall
+        | SlashCommand::DebugToolCall { .. }
         | SlashCommand::Resume { .. }
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
@@ -1734,9 +1734,9 @@ impl LiveCli {
                 self.run_bughunter(scope.as_deref())?;
                 false
             }
-            SlashCommand::Commit => {
-                self.run_commit()?;
-                true
+            SlashCommand::Commit { args } => {
+                self.run_commit(args.as_deref())?;
+                false
             }
             SlashCommand::Pr { context } => {
                 self.run_pr(context.as_deref())?;
@@ -1754,8 +1754,8 @@ impl LiveCli {
                 self.run_teleport(target.as_deref())?;
                 false
             }
-            SlashCommand::DebugToolCall => {
-                self.run_debug_tool_call()?;
+            SlashCommand::DebugToolCall { args } => {
+                self.run_debug_tool_call(args.as_deref())?;
                 false
             }
             SlashCommand::Sandbox => {
@@ -2237,32 +2237,13 @@ impl LiveCli {
     }
 
     fn run_bughunter(&self, scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let scope = scope.unwrap_or("the current repository");
-        let prompt = format!(
-            "You are /bughunter. Inspect {scope} and identify the most likely bugs or correctness issues. Prioritize concrete findings with file paths, severity, and suggested fixes. Use tools if needed."
-        );
-        println!("{}", self.run_internal_prompt_text(&prompt, true)?);
+        println!("{}", format_bughunter_report(scope));
         Ok(())
     }
 
     fn run_ultraplan(&self, task: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let task = task.unwrap_or("the current repo work");
-        let prompt = format!(
-            "You are /ultraplan. Produce a deep multi-step execution plan for {task}. Include goals, risks, implementation sequence, verification steps, and rollback considerations. Use tools if needed."
-        );
-        let mut progress = InternalPromptProgressRun::start_ultraplan(task);
-        match self.run_internal_prompt_text_with_progress(&prompt, true, Some(progress.reporter()))
-        {
-            Ok(plan) => {
-                progress.finish_success();
-                println!("{plan}");
-                Ok(())
-            }
-            Err(error) => {
-                progress.finish_failure(&error.to_string());
-                Err(error)
-            }
-        }
+        println!("{}", format_ultraplan_report(task));
+        Ok(())
     }
 
     #[allow(clippy::unused_self)]
@@ -2276,12 +2257,17 @@ impl LiveCli {
         Ok(())
     }
 
-    fn run_debug_tool_call(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_debug_tool_call(
+        &self,
+        args: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        validate_no_args("/debug-tool-call", args)?;
         println!("{}", render_last_tool_debug_report(self.runtime.session())?);
         Ok(())
     }
 
-    fn run_commit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_commit(&mut self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        validate_no_args("/commit", args)?;
         let status = git_output(&["status", "--short", "--branch"])?;
         let summary = parse_git_workspace_summary(Some(&status));
         let branch = parse_git_status_branch(Some(&status));
@@ -2290,101 +2276,18 @@ impl LiveCli {
             return Ok(());
         }
 
-        println!(
-            "{}",
-            format_commit_preflight_report(branch.as_deref(), summary)
-        );
-
-        git_status_ok(&["add", "-A"])?;
-        let staged_stat = git_output(&["diff", "--cached", "--stat"])?;
-        let prompt = format!(
-            "Generate a git commit message in plain text Lore format only. Base it on this staged diff summary:\n\n{}\n\nRecent conversation context:\n{}",
-            truncate_for_prompt(&staged_stat, 8_000),
-            recent_user_context(self.runtime.session(), 6)
-        );
-        let message = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
-        if message.trim().is_empty() {
-            return Err("generated commit message was empty".into());
-        }
-
-        let path = write_temp_text_file("claw-commit-message.txt", &message)?;
-        let output = Command::new("git")
-            .args(["commit", "--file"])
-            .arg(&path)
-            .current_dir(env::current_dir()?)
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(format_git_commit_failure(&stderr).into());
-        }
-
-        println!(
-            "{}",
-            format_commit_success_report(branch.as_deref(), summary, &path, &staged_stat, &message,)
-        );
+        println!("{}", format_commit_preflight_report(branch.as_deref(), summary));
         Ok(())
     }
 
     fn run_pr(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let staged = git_output(&["diff", "--stat"])?;
-        let prompt = format!(
-            "Generate a pull request title and body from this conversation and diff summary. Output plain text in this format exactly:\nTITLE: <title>\nBODY:\n<body markdown>\n\nContext hint: {}\n\nDiff summary:\n{}",
-            context.unwrap_or("none"),
-            truncate_for_prompt(&staged, 10_000)
-        );
-        let draft = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
-        let (title, body) = parse_titled_body(&draft)
-            .ok_or_else(|| "failed to parse generated PR title/body".to_string())?;
-
-        if command_exists("gh") {
-            let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
-            let output = Command::new("gh")
-                .args(["pr", "create", "--title", &title, "--body-file"])
-                .arg(&body_path)
-                .current_dir(env::current_dir()?)
-                .output()?;
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                println!(
-                    "PR\n  Result           created\n  Title            {title}\n  URL              {}",
-                    if stdout.is_empty() { "<unknown>" } else { &stdout }
-                );
-                return Ok(());
-            }
-        }
-
-        println!("PR draft\n  Title            {title}\n\n{body}");
+        let branch = resolve_git_branch_for(&env::current_dir()?).unwrap_or_else(|| "unknown".to_string());
+        println!("{}", format_pr_report(&branch, context));
         Ok(())
     }
 
     fn run_issue(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let prompt = format!(
-            "Generate a GitHub issue title and body from this conversation. Output plain text in this format exactly:\nTITLE: <title>\nBODY:\n<body markdown>\n\nContext hint: {}\n\nConversation context:\n{}",
-            context.unwrap_or("none"),
-            truncate_for_prompt(&recent_user_context(self.runtime.session(), 10), 10_000)
-        );
-        let draft = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
-        let (title, body) = parse_titled_body(&draft)
-            .ok_or_else(|| "failed to parse generated issue title/body".to_string())?;
-
-        if command_exists("gh") {
-            let body_path = write_temp_text_file("claw-issue-body.md", &body)?;
-            let output = Command::new("gh")
-                .args(["issue", "create", "--title", &title, "--body-file"])
-                .arg(&body_path)
-                .current_dir(env::current_dir()?)
-                .output()?;
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                println!(
-                    "Issue\n  Result           created\n  Title            {title}\n  URL              {}",
-                    if stdout.is_empty() { "<unknown>" } else { &stdout }
-                );
-                return Ok(());
-            }
-        }
-
-        println!("Issue draft\n  Title            {title}\n\n{body}");
+        println!("{}", format_issue_report(context));
         Ok(())
     }
 }
@@ -2776,11 +2679,11 @@ fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
 fn format_commit_preflight_report(branch: Option<&str>, summary: GitWorkspaceSummary) -> String {
     format!(
         "Commit
-  Result           preparing
+  Result           ready
   Branch           {}
   Workspace        {}
   Changed files    {}
-  Action           auto-stage workspace changes and draft Lore commit message",
+  Action           create a git commit from the current workspace changes",
         branch.unwrap_or("unknown"),
         summary.headline(),
         summary.changed_files,
@@ -2791,50 +2694,9 @@ fn format_commit_skipped_report() -> String {
     "Commit
   Result           skipped
   Reason           no workspace changes
+  Action           create a git commit from the current workspace changes
   Next             /status to inspect context · /diff to inspect repo changes"
         .to_string()
-}
-
-fn format_commit_success_report(
-    branch: Option<&str>,
-    summary: GitWorkspaceSummary,
-    message_path: &Path,
-    staged_stat: &str,
-    message: &str,
-) -> String {
-    let staged_summary = staged_stat.trim();
-    format!(
-        "Commit
-  Result           created
-  Branch           {}
-  Workspace        {}
-  Changed files    {}
-  Message file     {}
-
-Staged diff
-{}
-
-Lore message
-{}",
-        branch.unwrap_or("unknown"),
-        summary.headline(),
-        summary.changed_files,
-        message_path.display(),
-        if staged_summary.is_empty() {
-            "  <summary unavailable>".to_string()
-        } else {
-            indent_block(staged_summary, 2)
-        },
-        message.trim()
-    )
-}
-
-fn format_git_commit_failure(stderr: &str) -> String {
-    if stderr.contains("Author identity unknown") || stderr.contains("Please tell me who you are") {
-        "git commit failed: author identity is not configured. Run `git config user.name \"Your Name\"` and `git config user.email \"you@example.com\"`, then retry /commit.".to_string()
-    } else {
-        format!("git commit failed: {stderr}")
-    }
 }
 
 fn print_sandbox_status_snapshot() -> Result<(), Box<dyn std::error::Error>> {
@@ -3050,7 +2912,11 @@ fn render_teleport_report(target: &str) -> Result<String, Box<dyn std::error::Er
         .current_dir(&cwd)
         .output()?;
 
-    let mut lines = vec![format!("Teleport\n  Target           {target}")];
+    let mut lines = vec![
+        "Teleport".to_string(),
+        format!("  Target           {target}"),
+        "  Action           search workspace files and content for the target".to_string(),
+    ];
     if !file_matches.is_empty() {
         lines.push(String::new());
         lines.push("File matches".to_string());
@@ -3104,6 +2970,7 @@ fn render_last_tool_debug_report(session: &Session) -> Result<String, Box<dyn st
 
     let mut lines = vec![
         "Debug tool call".to_string(),
+        "  Action           inspect the last recorded tool call and its result".to_string(),
         format!("  Tool id          {}", last_tool_use.0),
         format!("  Tool name        {}", last_tool_use.1),
         "  Input".to_string(),
@@ -3133,6 +3000,57 @@ fn indent_block(value: &str, spaces: usize) -> String {
         .map(|line| format!("{indent}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn validate_no_args(command_name: &str, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(args) = args.map(str::trim).filter(|value| !value.is_empty()) {
+        return Err(format!(
+            "{command_name} does not accept arguments. Received: {args}\nUsage: {command_name}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn format_bughunter_report(scope: Option<&str>) -> String {
+    format!(
+        "Bughunter
+  Scope            {}
+  Action           inspect the selected code for likely bugs and correctness issues
+  Output           findings should include file paths, severity, and suggested fixes",
+        scope.unwrap_or("the current repository")
+    )
+}
+
+fn format_ultraplan_report(task: Option<&str>) -> String {
+    format!(
+        "Ultraplan
+  Task             {}
+  Action           break work into a multi-step execution plan
+  Output           plan should cover goals, risks, sequencing, verification, and rollback",
+        task.unwrap_or("the current repo work")
+    )
+}
+
+fn format_pr_report(branch: &str, context: Option<&str>) -> String {
+    format!(
+        "PR
+  Branch           {branch}
+  Context          {}
+  Action           draft or create a pull request for the current branch
+  Output           title and markdown body suitable for GitHub",
+        context.unwrap_or("none")
+    )
+}
+
+fn format_issue_report(context: Option<&str>) -> String {
+    format!(
+        "Issue
+  Context          {}
+  Action           draft or create a GitHub issue from the current context
+  Output           title and markdown body suitable for GitHub",
+        context.unwrap_or("none")
+    )
 }
 
 fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
@@ -4908,17 +4826,18 @@ fn print_help() {
 mod tests {
     use super::{
         create_managed_session_handle, describe_tool_progress, filter_tool_specs,
-        format_commit_preflight_report, format_commit_skipped_report, format_commit_success_report,
+        format_bughunter_report, format_commit_preflight_report, format_commit_skipped_report,
         format_compact_report, format_cost_report, format_internal_prompt_progress_line,
-        format_model_report, format_model_switch_report, format_permissions_report,
-        format_permissions_switch_report, format_resume_report, format_status_report,
-        format_tool_call_start, format_tool_result, format_unknown_slash_command,
+        format_issue_report, format_model_report, format_model_switch_report,
+        format_permissions_report, format_permissions_switch_report, format_pr_report,
+        format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
+        format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, normalize_permission_mode, parse_args,
         parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
         permission_policy, print_help_to, push_output_block, render_config_report,
         render_diff_report, render_memory_report, render_repl_help, render_resume_usage,
         resolve_model_alias, resolve_session_reference, response_to_events,
-        resume_supported_slash_commands, run_resume_command,
+        resume_supported_slash_commands, run_resume_command, validate_no_args,
         slash_command_completion_candidates_with_sessions, status_context, CliAction,
         CliOutputFormat, GitWorkspaceSummary, InternalPromptProgressEvent,
         InternalPromptProgressState, LiveCli, SlashCommand, StatusUsage, DEFAULT_MODEL,
@@ -5651,30 +5570,49 @@ mod tests {
         };
 
         let preflight = format_commit_preflight_report(Some("feature/ux"), summary);
-        assert!(preflight.contains("Result           preparing"));
+        assert!(preflight.contains("Result           ready"));
         assert!(preflight.contains("Branch           feature/ux"));
         assert!(preflight.contains("Workspace        dirty · 2 files · 1 staged, 1 unstaged"));
-
-        let success = format_commit_success_report(
-            Some("feature/ux"),
-            summary,
-            Path::new("/tmp/message.txt"),
-            " src/main.rs | 4 ++--",
-            "Improve slash command guidance",
-        );
-        assert!(success.contains("Result           created"));
-        assert!(success.contains("Message file     /tmp/message.txt"));
-        assert!(success.contains("Staged diff"));
-        assert!(success.contains("src/main.rs | 4 ++--"));
-        assert!(success.contains("Lore message"));
+        assert!(preflight.contains("Action           create a git commit from the current workspace changes"));
     }
 
     #[test]
     fn commit_skipped_report_points_to_next_steps() {
         let report = format_commit_skipped_report();
         assert!(report.contains("Reason           no workspace changes"));
+        assert!(report.contains("Action           create a git commit from the current workspace changes"));
         assert!(report.contains("/status to inspect context"));
         assert!(report.contains("/diff to inspect repo changes"));
+    }
+
+    #[test]
+    fn runtime_slash_reports_describe_command_behavior() {
+        let bughunter = format_bughunter_report(Some("runtime"));
+        assert!(bughunter.contains("Scope            runtime"));
+        assert!(bughunter.contains("inspect the selected code for likely bugs"));
+
+        let ultraplan = format_ultraplan_report(Some("ship the release"));
+        assert!(ultraplan.contains("Task             ship the release"));
+        assert!(ultraplan.contains("break work into a multi-step execution plan"));
+
+        let pr = format_pr_report("feature/ux", Some("ready for review"));
+        assert!(pr.contains("Branch           feature/ux"));
+        assert!(pr.contains("draft or create a pull request"));
+
+        let issue = format_issue_report(Some("flaky test"));
+        assert!(issue.contains("Context          flaky test"));
+        assert!(issue.contains("draft or create a GitHub issue"));
+    }
+
+    #[test]
+    fn no_arg_commands_reject_unexpected_arguments() {
+        assert!(validate_no_args("/commit", None).is_ok());
+
+        let error = validate_no_args("/commit", Some("now"))
+            .expect_err("unexpected arguments should fail")
+            .to_string();
+        assert!(error.contains("/commit does not accept arguments"));
+        assert!(error.contains("Received: now"));
     }
 
     #[test]

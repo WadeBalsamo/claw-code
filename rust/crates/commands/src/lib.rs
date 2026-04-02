@@ -241,7 +241,9 @@ pub enum SlashCommand {
     Bughunter {
         scope: Option<String>,
     },
-    Commit,
+    Commit {
+        args: Option<String>,
+    },
     Pr {
         context: Option<String>,
     },
@@ -254,7 +256,9 @@ pub enum SlashCommand {
     Teleport {
         target: Option<String>,
     },
-    DebugToolCall,
+    DebugToolCall {
+        args: Option<String>,
+    },
     Model {
         model: Option<String>,
     },
@@ -313,7 +317,9 @@ impl SlashCommand {
             "bughunter" => Self::Bughunter {
                 scope: remainder_after_command(trimmed, command),
             },
-            "commit" => Self::Commit,
+            "commit" => Self::Commit {
+                args: remainder_after_command(trimmed, command),
+            },
             "pr" => Self::Pr {
                 context: remainder_after_command(trimmed, command),
             },
@@ -326,7 +332,9 @@ impl SlashCommand {
             "teleport" => Self::Teleport {
                 target: remainder_after_command(trimmed, command),
             },
-            "debug-tool-call" => Self::DebugToolCall,
+            "debug-tool-call" => Self::DebugToolCall {
+                args: remainder_after_command(trimmed, command),
+            },
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
@@ -1304,12 +1312,12 @@ pub fn handle_slash_command(
         }),
         SlashCommand::Status
         | SlashCommand::Bughunter { .. }
-        | SlashCommand::Commit
+        | SlashCommand::Commit { .. }
         | SlashCommand::Pr { .. }
         | SlashCommand::Issue { .. }
         | SlashCommand::Ultraplan { .. }
         | SlashCommand::Teleport { .. }
-        | SlashCommand::DebugToolCall
+        | SlashCommand::DebugToolCall { .. }
         | SlashCommand::Sandbox
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
@@ -1417,7 +1425,10 @@ mod tests {
                 scope: Some("runtime".to_string())
             })
         );
-        assert_eq!(SlashCommand::parse("/commit"), Some(SlashCommand::Commit));
+        assert_eq!(
+            SlashCommand::parse("/commit"),
+            Some(SlashCommand::Commit { args: None })
+        );
         assert_eq!(
             SlashCommand::parse("/pr ready for review"),
             Some(SlashCommand::Pr {
@@ -1444,7 +1455,7 @@ mod tests {
         );
         assert_eq!(
             SlashCommand::parse("/debug-tool-call"),
-            Some(SlashCommand::DebugToolCall)
+            Some(SlashCommand::DebugToolCall { args: None })
         );
         assert_eq!(
             SlashCommand::parse("/bughunter runtime"),
@@ -1452,7 +1463,10 @@ mod tests {
                 scope: Some("runtime".to_string())
             })
         );
-        assert_eq!(SlashCommand::parse("/commit"), Some(SlashCommand::Commit));
+        assert_eq!(
+            SlashCommand::parse("/commit"),
+            Some(SlashCommand::Commit { args: None })
+        );
         assert_eq!(
             SlashCommand::parse("/pr ready for review"),
             Some(SlashCommand::Pr {
@@ -1479,7 +1493,19 @@ mod tests {
         );
         assert_eq!(
             SlashCommand::parse("/debug-tool-call"),
-            Some(SlashCommand::DebugToolCall)
+            Some(SlashCommand::DebugToolCall { args: None })
+        );
+        assert_eq!(
+            SlashCommand::parse("/commit now"),
+            Some(SlashCommand::Commit {
+                args: Some("now".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/debug-tool-call verbose"),
+            Some(SlashCommand::DebugToolCall {
+                args: Some("verbose".to_string())
+            })
         );
         assert_eq!(
             SlashCommand::parse("/model claude-opus"),
