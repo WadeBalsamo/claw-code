@@ -30,12 +30,11 @@ use plugins::{PluginManager, PluginManagerConfig};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
-    parse_oauth_callback_request_target, resolve_sandbox_status, save_oauth_credentials,
-    ApiClient, ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource,
-    ContentBlock, ConversationMessage, ConversationRuntime, MessageRole, PromptCacheEvent,
-    OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
-    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    parse_oauth_callback_request_target, resolve_sandbox_status, save_oauth_credentials, ApiClient,
+    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
+    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
 use tools::GlobalToolRegistry;
@@ -56,16 +55,38 @@ const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 const LEGACY_SESSION_EXTENSION: &str = "json";
+const LATEST_SESSION_REFERENCE: &str = "latest";
+const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
+const CLI_OPTION_SUGGESTIONS: &[&str] = &[
+    "--help",
+    "-h",
+    "--version",
+    "-V",
+    "--model",
+    "--output-format",
+    "--permission-mode",
+    "--dangerously-skip-permissions",
+    "--allowedTools",
+    "--allowed-tools",
+    "--resume",
+    "--print",
+    "-p",
+];
 
 type AllowedToolSet = BTreeSet<String>;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!(
-            "error: {error}
+        let message = error.to_string();
+        if message.contains("`claw --help`") {
+            eprintln!("error: {message}");
+        } else {
+            eprintln!(
+                "error: {message}
 
 Run `claw --help` for usage."
-        );
+            );
+        }
         std::process::exit(1);
     }
 }
@@ -165,6 +186,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut model = DEFAULT_MODEL.to_string();
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode = default_permission_mode();
+    let mut wants_help = false;
     let mut wants_version = false;
     let mut allowed_tool_values = Vec::new();
     let mut rest = Vec::new();
@@ -172,6 +194,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
 
     while index < args.len() {
         match args[index].as_str() {
+            "--help" | "-h" if rest.is_empty() => {
+                wants_help = true;
+                index += 1;
+            }
             "--version" | "-V" => {
                 wants_version = true;
                 index += 1;
@@ -232,6 +258,15 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 output_format = CliOutputFormat::Text;
                 index += 1;
             }
+            "--resume" if rest.is_empty() => {
+                rest.push("--resume".to_string());
+                index += 1;
+            }
+            flag if rest.is_empty() && flag.starts_with("--resume=") => {
+                rest.push("--resume".to_string());
+                rest.push(flag[9..].to_string());
+                index += 1;
+            }
             "--allowedTools" | "--allowed-tools" => {
                 let value = args
                     .get(index + 1)
@@ -247,11 +282,18 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 allowed_tool_values.push(flag[16..].to_string());
                 index += 1;
             }
+            other if rest.is_empty() && other.starts_with('-') => {
+                return Err(format_unknown_option(other))
+            }
             other => {
                 rest.push(other.to_string());
                 index += 1;
             }
         }
+    }
+
+    if wants_help {
+        return Ok(CliAction::Help);
     }
 
     if wants_version {
@@ -266,9 +308,6 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             allowed_tools,
             permission_mode,
         });
-    }
-    if matches!(rest.first().map(String::as_str), Some("--help" | "-h")) {
-        return Ok(CliAction::Help);
     }
     if rest.first().map(String::as_str) == Some("--resume") {
         return parse_resume_args(&rest[1..]);
@@ -323,15 +362,125 @@ fn parse_direct_slash_cli_action(rest: &[String]) -> Result<CliAction, String> {
         Some(SlashCommand::Help) => Ok(CliAction::Help),
         Some(SlashCommand::Agents { args }) => Ok(CliAction::Agents { args }),
         Some(SlashCommand::Skills { args }) => Ok(CliAction::Skills { args }),
+        Some(SlashCommand::Unknown(name)) => Err(format_unknown_direct_slash_command(&name)),
         Some(command) => Err(format!(
             "unsupported direct slash command outside the REPL: {command_name}",
-            command_name = match command {
-                SlashCommand::Unknown(name) => format!("/{name}"),
-                _ => rest[0].clone(),
+            command_name = {
+                let _ = command;
+                rest[0].clone()
             }
         )),
         None => Err(format!("unknown subcommand: {}", rest[0])),
     }
+}
+
+fn format_unknown_option(option: &str) -> String {
+    let mut message = format!("unknown option: {option}");
+    if let Some(suggestion) = suggest_closest_term(option, CLI_OPTION_SUGGESTIONS) {
+        message.push_str("\nDid you mean ");
+        message.push_str(suggestion);
+        message.push('?');
+    }
+    message.push_str("\nRun `claw --help` for usage.");
+    message
+}
+
+fn format_unknown_direct_slash_command(name: &str) -> String {
+    let mut message = format!("unknown slash command outside the REPL: /{name}");
+    if let Some(suggestions) = render_suggestion_line("Did you mean", &suggest_slash_commands(name))
+    {
+        message.push('\n');
+        message.push_str(&suggestions);
+    }
+    message.push_str("\nRun `claw --help` for CLI usage, or start `claw` and use /help.");
+    message
+}
+
+fn format_unknown_slash_command(name: &str) -> String {
+    let mut message = format!("Unknown slash command: /{name}");
+    if let Some(suggestions) = render_suggestion_line("Did you mean", &suggest_slash_commands(name))
+    {
+        message.push('\n');
+        message.push_str(&suggestions);
+    }
+    message.push_str("\n  Help             /help lists available slash commands");
+    message
+}
+
+fn render_suggestion_line(label: &str, suggestions: &[String]) -> Option<String> {
+    (!suggestions.is_empty()).then(|| format!("  {label:<16} {}", suggestions.join(", "),))
+}
+
+fn suggest_slash_commands(input: &str) -> Vec<String> {
+    let mut candidates = slash_command_specs()
+        .iter()
+        .flat_map(|spec| {
+            std::iter::once(spec.name)
+                .chain(spec.aliases.iter().copied())
+                .map(|name| format!("/{name}"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    let candidate_refs = candidates.iter().map(String::as_str).collect::<Vec<_>>();
+    ranked_suggestions(input.trim_start_matches('/'), &candidate_refs)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn suggest_closest_term<'a>(input: &str, candidates: &'a [&'a str]) -> Option<&'a str> {
+    ranked_suggestions(input, candidates).into_iter().next()
+}
+
+fn ranked_suggestions<'a>(input: &str, candidates: &'a [&'a str]) -> Vec<&'a str> {
+    let normalized_input = input.trim_start_matches('/').to_ascii_lowercase();
+    let mut ranked = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let normalized_candidate = candidate.trim_start_matches('/').to_ascii_lowercase();
+            let distance = levenshtein_distance(&normalized_input, &normalized_candidate);
+            let prefix_bonus = usize::from(
+                !(normalized_candidate.starts_with(&normalized_input)
+                    || normalized_input.starts_with(&normalized_candidate)),
+            );
+            let score = distance + prefix_bonus;
+            (score <= 4).then_some((score, *candidate))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| left.cmp(right).then_with(|| left.1.cmp(right.1)));
+    ranked
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .take(3)
+        .collect()
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    if left.is_empty() {
+        return right.chars().count();
+    }
+    if right.is_empty() {
+        return left.chars().count();
+    }
+
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right_chars.len() + 1];
+
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let substitution_cost = usize::from(left_char != *right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution_cost);
+        }
+        previous.clone_from(&current);
+    }
+
+    previous[right_chars.len()]
 }
 
 fn resolve_model_alias(model: &str) -> &str {
@@ -421,11 +570,13 @@ fn parse_system_prompt_args(args: &[String]) -> Result<CliAction, String> {
 }
 
 fn parse_resume_args(args: &[String]) -> Result<CliAction, String> {
-    let session_path = args
-        .first()
-        .ok_or_else(|| "missing session path for --resume".to_string())
-        .map(PathBuf::from)?;
-    let commands = args[1..].to_vec();
+    let (session_path, commands) = match args.first() {
+        None => (PathBuf::from(LATEST_SESSION_REFERENCE), Vec::new()),
+        Some(first) if first.trim_start().starts_with('/') => {
+            (PathBuf::from(LATEST_SESSION_REFERENCE), args.to_vec())
+        }
+        Some(first) => (PathBuf::from(first), args[1..].to_vec()),
+    };
     if commands
         .iter()
         .any(|command| !command.trim_start().starts_with('/'))
@@ -783,6 +934,15 @@ fn format_resume_report(session_path: &str, message_count: usize, turns: u32) ->
     )
 }
 
+fn render_resume_usage() -> String {
+    format!(
+        "Resume
+  Usage            /resume <session-path|session-id|{LATEST_SESSION_REFERENCE}>
+  Auto-save        .claw/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}
+  Tip              use /session list to inspect saved sessions"
+    )
+}
+
 fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
     if skipped {
         format!(
@@ -1014,6 +1174,7 @@ fn run_resume_command(
                 message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
             })
         }
+        SlashCommand::Unknown(name) => Err(format_unknown_slash_command(name).into()),
         SlashCommand::Bughunter { .. }
         | SlashCommand::Commit
         | SlashCommand::Pr { .. }
@@ -1025,8 +1186,7 @@ fn run_resume_command(
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
-        | SlashCommand::Plugins { .. }
-        | SlashCommand::Unknown(_) => Err("unsupported resumed slash command".into()),
+        | SlashCommand::Plugins { .. } => Err("unsupported resumed slash command".into()),
     }
 }
 
@@ -1080,7 +1240,7 @@ struct SessionHandle {
 struct ManagedSessionSummary {
     id: String,
     path: PathBuf,
-    modified_epoch_secs: u64,
+    modified_epoch_millis: u128,
     message_count: usize,
     parent_session_id: Option<String>,
     branch_name: Option<String>,
@@ -1188,6 +1348,10 @@ impl LiveCli {
             |_| "<unknown>".to_string(),
             |path| path.display().to_string(),
         );
+        let session_path = self.session.path.strip_prefix(Path::new(&cwd)).map_or_else(
+            |_| self.session.path.display().to_string(),
+            |path| path.display().to_string(),
+        );
         format!(
             "\x1b[38;5;196m\
  ██████╗██╗      █████╗ ██╗    ██╗\n\
@@ -1199,12 +1363,14 @@ impl LiveCli {
   \x1b[2mModel\x1b[0m            {}\n\
   \x1b[2mPermissions\x1b[0m      {}\n\
   \x1b[2mDirectory\x1b[0m        {}\n\
-  \x1b[2mSession\x1b[0m          {}\n\n\
-  Type \x1b[1m/help\x1b[0m for commands · \x1b[2mShift+Enter\x1b[0m for newline",
+  \x1b[2mSession\x1b[0m          {}\n\
+  \x1b[2mAuto-save\x1b[0m        {}\n\n\
+  Type \x1b[1m/help\x1b[0m for commands · \x1b[2m/resume latest\x1b[0m jumps back to the newest session",
             self.model,
             self.permission_mode.as_str(),
             cwd,
             self.session.id,
+            session_path,
         )
     }
 
@@ -1416,7 +1582,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Unknown(name) => {
-                eprintln!("unknown slash command: /{name}");
+                eprintln!("{}", format_unknown_slash_command(&name));
                 false
             }
         })
@@ -1592,7 +1758,7 @@ impl LiveCli {
         session_path: Option<String>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(session_ref) = session_path else {
-            println!("Usage: /resume <session-path>");
+            println!("{}", render_resume_usage());
             return Ok(false);
         };
 
@@ -2002,12 +2168,23 @@ fn create_managed_session_handle(
 }
 
 fn resolve_session_reference(reference: &str) -> Result<SessionHandle, Box<dyn std::error::Error>> {
+    if SESSION_REFERENCE_ALIASES
+        .iter()
+        .any(|alias| reference.eq_ignore_ascii_case(alias))
+    {
+        let latest = latest_managed_session()?;
+        return Ok(SessionHandle {
+            id: latest.id,
+            path: latest.path,
+        });
+    }
+
     let direct = PathBuf::from(reference);
     let looks_like_path = direct.extension().is_some() || direct.components().count() > 1;
     let path = if direct.exists() {
         direct
     } else if looks_like_path {
-        return Err(format!("session not found: {reference}").into());
+        return Err(format_missing_session_reference(reference).into());
     } else {
         resolve_managed_session_path(reference)?
     };
@@ -2031,7 +2208,7 @@ fn resolve_managed_session_path(session_id: &str) -> Result<PathBuf, Box<dyn std
             return Ok(path);
         }
     }
-    Err(format!("session not found: {session_id}").into())
+    Err(format_missing_session_reference(session_id).into())
 }
 
 fn is_managed_session_file(path: &Path) -> bool {
@@ -2051,51 +2228,77 @@ fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::er
             continue;
         }
         let metadata = entry.metadata()?;
-        let modified_epoch_secs = metadata
+        let modified_epoch_millis = metadata
             .modified()
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
+            .map(|duration| duration.as_millis())
             .unwrap_or_default();
         let (id, message_count, parent_session_id, branch_name) = Session::load_from_path(&path)
-            .map(|session| {
-                let parent_session_id = session
-                    .fork
-                    .as_ref()
-                    .map(|fork| fork.parent_session_id.clone());
-                let branch_name = session
-                    .fork
-                    .as_ref()
-                    .and_then(|fork| fork.branch_name.clone());
-                (
-                    session.session_id,
-                    session.messages.len(),
-                    parent_session_id,
-                    branch_name,
-                )
-            })
-            .unwrap_or_else(|_| {
-                (
-                    path.file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    0,
-                    None,
-                    None,
-                )
-            });
+            .map_or_else(
+                |_| {
+                    (
+                        path.file_stem()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        0,
+                        None,
+                        None,
+                    )
+                },
+                |session| {
+                    let parent_session_id = session
+                        .fork
+                        .as_ref()
+                        .map(|fork| fork.parent_session_id.clone());
+                    let branch_name = session
+                        .fork
+                        .as_ref()
+                        .and_then(|fork| fork.branch_name.clone());
+                    (
+                        session.session_id,
+                        session.messages.len(),
+                        parent_session_id,
+                        branch_name,
+                    )
+                },
+            );
         sessions.push(ManagedSessionSummary {
             id,
             path,
-            modified_epoch_secs,
+            modified_epoch_millis,
             message_count,
             parent_session_id,
             branch_name,
         });
     }
-    sessions.sort_by(|left, right| right.modified_epoch_secs.cmp(&left.modified_epoch_secs));
+    sessions.sort_by(|left, right| {
+        right
+            .modified_epoch_millis
+            .cmp(&left.modified_epoch_millis)
+            .then_with(|| right.id.cmp(&left.id))
+    });
     Ok(sessions)
+}
+
+fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn std::error::Error>> {
+    list_managed_sessions()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format_no_managed_sessions().into())
+}
+
+fn format_missing_session_reference(reference: &str) -> String {
+    format!(
+        "session not found: {reference}\nHint: managed sessions live in .claw/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
+    )
+}
+
+fn format_no_managed_sessions() -> String {
+    format!(
+        "no managed sessions found in .claw/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
+    )
 }
 
 fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -2129,12 +2332,30 @@ fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::e
             "  {id:<20} {marker:<10} msgs={msgs:<4} modified={modified}{lineage} path={path}",
             id = session.id,
             msgs = session.message_count,
-            modified = session.modified_epoch_secs,
+            modified = format_session_modified_age(session.modified_epoch_millis),
             lineage = lineage,
             path = session.path.display(),
         ));
     }
     Ok(lines.join("\n"))
+}
+
+fn format_session_modified_age(modified_epoch_millis: u128) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(modified_epoch_millis, |duration| duration.as_millis());
+    let delta_seconds = now
+        .saturating_sub(modified_epoch_millis)
+        .checked_div(1_000)
+        .unwrap_or_default();
+    match delta_seconds {
+        0..=4 => "just-now".to_string(),
+        5..=59 => format!("{delta_seconds}s-ago"),
+        60..=3_599 => format!("{}m-ago", delta_seconds / 60),
+        3_600..=86_399 => format!("{}h-ago", delta_seconds / 3_600),
+        _ => format!("{}d-ago", delta_seconds / 86_400),
+    }
 }
 
 fn render_repl_help() -> String {
@@ -2146,6 +2367,9 @@ fn render_repl_help() -> String {
         "  Tab                  Complete slash commands".to_string(),
         "  Ctrl-C               Clear input (or exit on empty prompt)".to_string(),
         "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
+        "  Auto-save            .claw/sessions/<session-id>.jsonl".to_string(),
+        "  Resume latest        /resume latest".to_string(),
+        "  Browse sessions      /session list".to_string(),
         String::new(),
         render_slash_command_help(),
     ]
@@ -3146,7 +3370,8 @@ fn build_runtime(
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     progress_reporter: Option<InternalPromptProgressReporter>,
-) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>> {
+) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
+{
     let (feature_config, tool_registry) = build_runtime_plugin_state()?;
     let mut runtime = ConversationRuntime::new_with_features(
         session,
@@ -3286,7 +3511,6 @@ impl AnthropicRuntimeClient {
             progress_reporter,
         })
     }
-
 }
 
 fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
@@ -4023,7 +4247,9 @@ fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<Assistant
     }
 }
 
-fn prompt_cache_record_to_runtime_event(record: api::PromptCacheRecord) -> Option<PromptCacheEvent> {
+fn prompt_cache_record_to_runtime_event(
+    record: api::PromptCacheRecord,
+) -> Option<PromptCacheEvent> {
     let cache_break = record.cache_break?;
     Some(PromptCacheEvent {
         unexpected: cache_break.unexpected,
@@ -4146,6 +4372,7 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "claw v{VERSION}")?;
     writeln!(out)?;
@@ -4167,7 +4394,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "      Shorthand non-interactive prompt mode")?;
     writeln!(
         out,
-        "  claw --resume SESSION.jsonl [/status] [/compact] [...]"
+        "  claw --resume [SESSION.jsonl|session-id|latest] [/status] [/compact] [...]"
     )?;
     writeln!(
         out,
@@ -4217,6 +4444,20 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         .collect::<Vec<_>>()
         .join(", ");
     writeln!(out, "Resume-safe commands: {resume_commands}")?;
+    writeln!(out)?;
+    writeln!(out, "Session shortcuts:")?;
+    writeln!(
+        out,
+        "  REPL turns auto-save to .claw/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}"
+    )?;
+    writeln!(
+        out,
+        "  Use `{LATEST_SESSION_REFERENCE}` with --resume, /resume, or /session switch to target the newest saved session"
+    )?;
+    writeln!(
+        out,
+        "  Use /session list in the REPL to browse managed sessions"
+    )?;
     writeln!(out, "Examples:")?;
     writeln!(out, "  claw --model claude-opus \"summarize this repo\"")?;
     writeln!(
@@ -4227,9 +4468,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "  claw --allowedTools read,glob \"summarize Cargo.toml\""
     )?;
+    writeln!(out, "  claw --resume {LATEST_SESSION_REFERENCE}")?;
     writeln!(
         out,
-        "  claw --resume session.jsonl /status /diff /export notes.txt"
+        "  claw --resume {LATEST_SESSION_REFERENCE} /status /diff /export notes.txt"
     )?;
     writeln!(out, "  claw agents")?;
     writeln!(out, "  claw /skills")?;
@@ -4245,18 +4487,18 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::{
-        describe_tool_progress, filter_tool_specs, format_compact_report, format_cost_report,
-        format_internal_prompt_progress_line, format_model_report, format_model_switch_report,
-        format_permissions_report,
+        create_managed_session_handle, describe_tool_progress, filter_tool_specs,
+        format_compact_report, format_cost_report, format_internal_prompt_progress_line,
+        format_model_report, format_model_switch_report, format_permissions_report,
         format_permissions_switch_report, format_resume_report, format_status_report,
-        format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
-        parse_git_status_branch, parse_git_status_metadata_for, permission_policy,
-        print_help_to, push_output_block, render_config_report, render_diff_report,
-        render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
+        format_tool_call_start, format_tool_result, format_unknown_slash_command,
+        normalize_permission_mode, parse_args, parse_git_status_branch,
+        parse_git_status_metadata_for, permission_policy, print_help_to, push_output_block,
+        render_config_report, render_diff_report, render_memory_report, render_repl_help,
+        render_resume_usage, resolve_model_alias, resolve_session_reference, response_to_events,
         resume_supported_slash_commands, run_resume_command, status_context, CliAction,
-        CliOutputFormat, InternalPromptProgressEvent,
-        InternalPromptProgressState, SlashCommand, StatusUsage, DEFAULT_MODEL,
-        create_managed_session_handle, resolve_session_reference,
+        CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState, SlashCommand,
+        StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
@@ -4552,6 +4794,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_resume_flag_without_path_as_latest_session() {
+        assert_eq!(
+            parse_args(&["--resume".to_string()]).expect("args should parse"),
+            CliAction::ResumeSession {
+                session_path: PathBuf::from("latest"),
+                commands: vec![],
+            }
+        );
+        assert_eq!(
+            parse_args(&["--resume".to_string(), "/status".to_string()])
+                .expect("resume shortcut should parse"),
+            CliAction::ResumeSession {
+                session_path: PathBuf::from("latest"),
+                commands: vec!["/status".to_string()],
+            }
+        );
+    }
+
+    #[test]
     fn parses_resume_flag_with_multiple_slash_commands() {
         let args = vec![
             "--resume".to_string(),
@@ -4571,6 +4832,14 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn rejects_unknown_options_with_helpful_guidance() {
+        let error = parse_args(&["--resum".to_string()]).expect_err("unknown option should fail");
+        assert!(error.contains("unknown option: --resum"));
+        assert!(error.contains("Did you mean --resume?"));
+        assert!(error.contains("claw --help"));
     }
 
     #[test]
@@ -4643,6 +4912,8 @@ mod tests {
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
         assert!(help.contains("/exit"));
+        assert!(help.contains("Auto-save            .claw/sessions/<session-id>.jsonl"));
+        assert!(help.contains("Resume latest        /resume latest"));
     }
 
     #[test]
@@ -5022,8 +5293,10 @@ mod tests {
         let mut help = Vec::new();
         print_help_to(&mut help).expect("help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
-        assert!(help.contains("claw --resume SESSION.jsonl"));
-        assert!(help.contains("claw --resume session.jsonl /status /diff /export notes.txt"));
+        assert!(help.contains("claw --resume [SESSION.jsonl|session-id|latest]"));
+        assert!(help.contains("Use `latest` with --resume, /resume, or /session switch"));
+        assert!(help.contains("claw --resume latest"));
+        assert!(help.contains("claw --resume latest /status /diff /export notes.txt"));
     }
 
     #[test]
@@ -5051,12 +5324,66 @@ mod tests {
 
         let resolved = resolve_session_reference("legacy").expect("legacy session should resolve");
         assert_eq!(
-            resolved.path.canonicalize().expect("resolved path should exist"),
-            legacy_path.canonicalize().expect("legacy path should exist")
+            resolved
+                .path
+                .canonicalize()
+                .expect("resolved path should exist"),
+            legacy_path
+                .canonicalize()
+                .expect("legacy path should exist")
         );
 
         std::env::set_current_dir(previous).expect("restore cwd");
         std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+    }
+
+    #[test]
+    fn latest_session_alias_resolves_most_recent_managed_session() {
+        let _guard = cwd_lock().lock().expect("cwd lock");
+        let workspace = temp_workspace("latest-session-alias");
+        std::fs::create_dir_all(&workspace).expect("workspace should create");
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&workspace).expect("switch cwd");
+
+        let older = create_managed_session_handle("session-older").expect("older handle");
+        Session::new()
+            .with_persistence_path(older.path.clone())
+            .save_to_path(&older.path)
+            .expect("older session should save");
+        std::thread::sleep(Duration::from_millis(20));
+        let newer = create_managed_session_handle("session-newer").expect("newer handle");
+        Session::new()
+            .with_persistence_path(newer.path.clone())
+            .save_to_path(&newer.path)
+            .expect("newer session should save");
+
+        let resolved = resolve_session_reference("latest").expect("latest session should resolve");
+        assert_eq!(
+            resolved
+                .path
+                .canonicalize()
+                .expect("resolved path should exist"),
+            newer.path.canonicalize().expect("newer path should exist")
+        );
+
+        std::env::set_current_dir(previous).expect("restore cwd");
+        std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+    }
+
+    #[test]
+    fn unknown_slash_command_guidance_suggests_nearby_commands() {
+        let message = format_unknown_slash_command("stats");
+        assert!(message.contains("Unknown slash command: /stats"));
+        assert!(message.contains("/status"));
+        assert!(message.contains("/help"));
+    }
+
+    #[test]
+    fn resume_usage_mentions_latest_shortcut() {
+        let usage = render_resume_usage();
+        assert!(usage.contains("/resume <session-path|session-id|latest>"));
+        assert!(usage.contains(".claw/sessions/<session-id>.jsonl"));
+        assert!(usage.contains("/session list"));
     }
 
     fn cwd_lock() -> &'static Mutex<()> {
