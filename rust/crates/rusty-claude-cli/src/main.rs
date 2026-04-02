@@ -5796,9 +5796,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ANTHROPIC_API_KEY"]
     fn startup_banner_mentions_workflow_completions() {
         let _guard = env_lock();
+        // Inject dummy credentials so LiveCli can construct without real Anthropic key
+        std::env::set_var("ANTHROPIC_API_KEY", "test-dummy-key-for-banner-test");
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
 
@@ -5817,6 +5818,7 @@ mod tests {
         assert!(banner.contains("workflow completions"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
+        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
     #[test]
