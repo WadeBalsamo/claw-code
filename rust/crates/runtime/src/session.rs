@@ -152,7 +152,7 @@ impl Session {
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
         rotate_session_file_if_needed(path)?;
-        write_atomic(path, &self.render_jsonl_snapshot())?;
+        write_atomic(path, &self.render_jsonl_snapshot()?)?;
         cleanup_rotated_logs(path)?;
         Ok(())
     }
@@ -177,7 +177,9 @@ impl Session {
         self.touch();
         self.messages.push(message);
         let persist_result = {
-            let message_ref = self.messages.last().expect("message was just pushed");
+            let message_ref = self.messages.last().ok_or_else(|| {
+                SessionError::Format("message was just pushed but missing".to_string())
+            })?;
             self.append_persisted_message(message_ref)
         };
         if let Err(error) = persist_result {
@@ -220,7 +222,7 @@ impl Session {
     }
 
     #[must_use]
-    pub fn to_json(&self) -> JsonValue {
+    pub fn to_json(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
             "version".to_string(),
@@ -232,11 +234,11 @@ impl Session {
         );
         object.insert(
             "created_at_ms".to_string(),
-            JsonValue::Number(i64_from_u64(self.created_at_ms, "created_at_ms")),
+            JsonValue::Number(i64_from_u64(self.created_at_ms, "created_at_ms")?),
         );
         object.insert(
             "updated_at_ms".to_string(),
-            JsonValue::Number(i64_from_u64(self.updated_at_ms, "updated_at_ms")),
+            JsonValue::Number(i64_from_u64(self.updated_at_ms, "updated_at_ms")?),
         );
         object.insert(
             "messages".to_string(),
@@ -248,12 +250,12 @@ impl Session {
             ),
         );
         if let Some(compaction) = &self.compaction {
-            object.insert("compaction".to_string(), compaction.to_json());
+            object.insert("compaction".to_string(), compaction.to_json()?);
         }
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
         }
-        JsonValue::Object(object)
+        Ok(JsonValue::Object(object))
     }
 
     pub fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
@@ -384,10 +386,10 @@ impl Session {
         })
     }
 
-    fn render_jsonl_snapshot(&self) -> String {
-        let mut lines = vec![self.meta_record().render()];
+    fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
+        let mut lines = vec![self.meta_record()?.render()];
         if let Some(compaction) = &self.compaction {
-            lines.push(compaction.to_jsonl_record().render());
+            lines.push(compaction.to_jsonl_record()?.render());
         }
         lines.extend(
             self.messages
@@ -396,7 +398,7 @@ impl Session {
         );
         let mut rendered = lines.join("\n");
         rendered.push('\n');
-        rendered
+        Ok(rendered)
     }
 
     fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
@@ -415,7 +417,7 @@ impl Session {
         Ok(())
     }
 
-    fn meta_record(&self) -> JsonValue {
+    fn meta_record(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
             "type".to_string(),
@@ -431,16 +433,16 @@ impl Session {
         );
         object.insert(
             "created_at_ms".to_string(),
-            JsonValue::Number(i64_from_u64(self.created_at_ms, "created_at_ms")),
+            JsonValue::Number(i64_from_u64(self.created_at_ms, "created_at_ms")?),
         );
         object.insert(
             "updated_at_ms".to_string(),
-            JsonValue::Number(i64_from_u64(self.updated_at_ms, "updated_at_ms")),
+            JsonValue::Number(i64_from_u64(self.updated_at_ms, "updated_at_ms")?),
         );
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
         }
-        JsonValue::Object(object)
+        Ok(JsonValue::Object(object))
     }
 
     fn touch(&mut self) {
@@ -639,7 +641,7 @@ impl ContentBlock {
 
 impl SessionCompaction {
     #[must_use]
-    pub fn to_json(&self) -> JsonValue {
+    pub fn to_json(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
             "count".to_string(),
@@ -650,27 +652,38 @@ impl SessionCompaction {
             JsonValue::Number(i64_from_usize(
                 self.removed_message_count,
                 "removed_message_count",
-            )),
+            )?),
         );
         object.insert(
             "summary".to_string(),
             JsonValue::String(self.summary.clone()),
         );
-        JsonValue::Object(object)
+        Ok(JsonValue::Object(object))
     }
 
     #[must_use]
-    pub fn to_jsonl_record(&self) -> JsonValue {
-        let mut object = self
-            .to_json()
-            .as_object()
-            .cloned()
-            .expect("compaction should render to object");
+    pub fn to_jsonl_record(&self) -> Result<JsonValue, SessionError> {
+        let mut object = BTreeMap::new();
         object.insert(
             "type".to_string(),
             JsonValue::String("compaction".to_string()),
         );
-        JsonValue::Object(object)
+        object.insert(
+            "count".to_string(),
+            JsonValue::Number(i64::from(self.count)),
+        );
+        object.insert(
+            "removed_message_count".to_string(),
+            JsonValue::Number(i64_from_usize(
+                self.removed_message_count,
+                "removed_message_count",
+            )?),
+        );
+        object.insert(
+            "summary".to_string(),
+            JsonValue::String(self.summary.clone()),
+        );
+        Ok(JsonValue::Object(object))
     }
 
     fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
@@ -797,12 +810,14 @@ fn required_usize(object: &BTreeMap<String, JsonValue>, key: &str) -> Result<usi
     usize::try_from(value).map_err(|_| SessionError::Format(format!("{key} out of range")))
 }
 
-fn i64_from_u64(value: u64, key: &str) -> i64 {
-    i64::try_from(value).unwrap_or_else(|_| panic!("{key} out of range for JSON number"))
+fn i64_from_u64(value: u64, key: &str) -> Result<i64, SessionError> {
+    i64::try_from(value)
+        .map_err(|_| SessionError::Format(format!("{key} out of range for JSON number")))
 }
 
-fn i64_from_usize(value: usize, key: &str) -> i64 {
-    i64::try_from(value).unwrap_or_else(|_| panic!("{key} out of range for JSON number"))
+fn i64_from_usize(value: usize, key: &str) -> Result<i64, SessionError> {
+    i64::try_from(value)
+        .map_err(|_| SessionError::Format(format!("{key} out of range for JSON number")))
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
