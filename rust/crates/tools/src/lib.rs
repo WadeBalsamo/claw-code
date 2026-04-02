@@ -173,7 +173,7 @@ impl GlobalToolRegistry {
     pub fn permission_specs(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
-    ) -> Vec<(String, PermissionMode)> {
+    ) -> Result<Vec<(String, PermissionMode)>, String> {
         let builtin = mvp_tool_specs()
             .into_iter()
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
@@ -186,12 +186,11 @@ impl GlobalToolRegistry {
                     .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
             })
             .map(|tool| {
-                (
-                    tool.definition().name.clone(),
-                    permission_mode_from_plugin(tool.required_permission()),
-                )
-            });
-        builtin.chain(plugin).collect()
+                permission_mode_from_plugin(tool.required_permission())
+                    .map(|permission| (tool.definition().name.clone(), permission))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(builtin.chain(plugin).collect())
     }
 
     pub fn execute(&self, name: &str, input: &Value) -> Result<String, String> {
@@ -211,12 +210,12 @@ fn normalize_tool_name(value: &str) -> String {
     value.trim().replace('-', "_").to_ascii_lowercase()
 }
 
-fn permission_mode_from_plugin(value: &str) -> PermissionMode {
+fn permission_mode_from_plugin(value: &str) -> Result<PermissionMode, String> {
     match value {
-        "read-only" => PermissionMode::ReadOnly,
-        "workspace-write" => PermissionMode::WorkspaceWrite,
-        "danger-full-access" => PermissionMode::DangerFullAccess,
-        other => panic!("unsupported plugin permission: {other}"),
+        "read-only" => Ok(PermissionMode::ReadOnly),
+        "workspace-write" => Ok(PermissionMode::WorkspaceWrite),
+        "danger-full-access" => Ok(PermissionMode::DangerFullAccess),
+        other => Err(format!("unsupported plugin permission: {other}")),
     }
 }
 
@@ -3102,8 +3101,9 @@ mod tests {
 
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
-        execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        push_output_block, AgentInput, AgentJob, SubagentToolExecutor,
+        execute_tool, final_assistant_text, mvp_tool_specs, permission_mode_from_plugin,
+        persist_agent_terminal_state, push_output_block, AgentInput, AgentJob,
+        SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
@@ -3149,6 +3149,17 @@ mod tests {
     fn rejects_unknown_tool_names() {
         let error = execute_tool("nope", &json!({})).expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool"));
+    }
+
+    #[test]
+    fn permission_mode_from_plugin_rejects_invalid_inputs() {
+        let unknown_permission = permission_mode_from_plugin("admin")
+            .expect_err("unknown plugin permission should fail");
+        assert!(unknown_permission.contains("unsupported plugin permission: admin"));
+
+        let empty_permission = permission_mode_from_plugin("")
+            .expect_err("empty plugin permission should fail");
+        assert!(empty_permission.contains("unsupported plugin permission: "));
     }
 
     #[test]
