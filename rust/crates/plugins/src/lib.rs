@@ -67,12 +67,16 @@ pub struct PluginHooks {
     pub pre_tool_use: Vec<String>,
     #[serde(rename = "PostToolUse", default)]
     pub post_tool_use: Vec<String>,
+    #[serde(rename = "PostToolUseFailure", default)]
+    pub post_tool_use_failure: Vec<String>,
 }
 
 impl PluginHooks {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pre_tool_use.is_empty() && self.post_tool_use.is_empty()
+        self.pre_tool_use.is_empty()
+            && self.post_tool_use.is_empty()
+            && self.post_tool_use_failure.is_empty()
     }
 
     #[must_use]
@@ -84,6 +88,9 @@ impl PluginHooks {
         merged
             .post_tool_use
             .extend(other.post_tool_use.iter().cloned());
+        merged
+            .post_tool_use_failure
+            .extend(other.post_tool_use_failure.iter().cloned());
         merged
     }
 }
@@ -1691,6 +1698,11 @@ fn resolve_hooks(root: &Path, hooks: &PluginHooks) -> PluginHooks {
             .iter()
             .map(|entry| resolve_hook_entry(root, entry))
             .collect(),
+        post_tool_use_failure: hooks
+            .post_tool_use_failure
+            .iter()
+            .map(|entry| resolve_hook_entry(root, entry))
+            .collect(),
     }
 }
 
@@ -1739,7 +1751,12 @@ fn validate_hook_paths(root: Option<&Path>, hooks: &PluginHooks) -> Result<(), P
     let Some(root) = root else {
         return Ok(());
     };
-    for entry in hooks.pre_tool_use.iter().chain(hooks.post_tool_use.iter()) {
+    for entry in hooks
+        .pre_tool_use
+        .iter()
+        .chain(hooks.post_tool_use.iter())
+        .chain(hooks.post_tool_use_failure.iter())
+    {
         validate_command_path(root, entry, "hook")?;
     }
     Ok(())
