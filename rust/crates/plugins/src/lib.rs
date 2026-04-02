@@ -1631,6 +1631,12 @@ fn build_plugin_manifest(
     validate_command_entries(root, raw.hooks.post_tool_use.iter(), "hook", &mut errors);
     validate_command_entries(
         root,
+        raw.hooks.post_tool_use_failure.iter(),
+        "hook",
+        &mut errors,
+    );
+    validate_command_entries(
+        root,
         raw.lifecycle.init.iter(),
         "lifecycle command",
         &mut errors,
@@ -2301,6 +2307,16 @@ mod tests {
             root.join(MANIFEST_FILE_NAME).as_path(),
             format!(
                 "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"description\": \"directory path plugin\",\n  \"hooks\": {{\n    \"PreToolUse\": [\"./hooks/pre-dir\"]\n  }},\n  \"lifecycle\": {{\n    \"Init\": [\"./lifecycle/init-dir\"]\n  }},\n  \"tools\": [\n    {{\n      \"name\": \"dir_tool\",\n      \"description\": \"Directory tool\",\n      \"inputSchema\": {{\"type\": \"object\"}},\n      \"command\": \"./tools/tool-dir\"\n    }}\n  ],\n  \"commands\": [\n    {{\n      \"name\": \"sync\",\n      \"description\": \"Directory command\",\n      \"command\": \"./commands/sync-dir\"\n    }}\n  ]\n}}"
+            )
+            .as_str(),
+        );
+    }
+
+    fn write_broken_failure_hook_plugin(root: &Path, name: &str) {
+        write_file(
+            root.join(MANIFEST_RELATIVE_PATH).as_path(),
+            format!(
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"description\": \"broken plugin\",\n  \"hooks\": {{\n    \"PostToolUseFailure\": [\"./hooks/missing-failure.sh\"]\n  }}\n}}"
             )
             .as_str(),
         );
@@ -3178,20 +3194,52 @@ mod tests {
 
     #[test]
     fn rejects_plugin_sources_with_missing_hook_paths() {
+        // given
         let config_home = temp_dir("broken-home");
         let source_root = temp_dir("broken-source");
         write_broken_plugin(&source_root, "broken");
 
         let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        // when
         let error = manager
             .validate_plugin_source(source_root.to_str().expect("utf8 path"))
             .expect_err("missing hook file should fail validation");
+
+        // then
         assert!(error.to_string().contains("does not exist"));
 
         let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
         let install_error = manager
             .install(source_root.to_str().expect("utf8 path"))
             .expect_err("install should reject invalid hook paths");
+        assert!(install_error.to_string().contains("does not exist"));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn rejects_plugin_sources_with_missing_failure_hook_paths() {
+        // given
+        let config_home = temp_dir("broken-failure-home");
+        let source_root = temp_dir("broken-failure-source");
+        write_broken_failure_hook_plugin(&source_root, "broken-failure");
+
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        // when
+        let error = manager
+            .validate_plugin_source(source_root.to_str().expect("utf8 path"))
+            .expect_err("missing failure hook file should fail validation");
+
+        // then
+        assert!(error.to_string().contains("does not exist"));
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let install_error = manager
+            .install(source_root.to_str().expect("utf8 path"))
+            .expect_err("install should reject invalid failure hook paths");
         assert!(install_error.to_string().contains("does not exist"));
 
         let _ = fs::remove_dir_all(config_home);
