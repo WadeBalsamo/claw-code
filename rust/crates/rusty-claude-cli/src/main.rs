@@ -3732,7 +3732,8 @@ fn build_runtime(
             progress_reporter,
         )?,
         CliToolExecutor::new(allowed_tools.clone(), emit_output, tool_registry.clone()),
-        permission_policy(permission_mode, &feature_config, &tool_registry),
+        permission_policy(permission_mode, &feature_config, &tool_registry)
+            .map_err(std::io::Error::other)?,
         system_prompt,
         &feature_config,
     );
@@ -4731,13 +4732,13 @@ fn permission_policy(
     mode: PermissionMode,
     feature_config: &runtime::RuntimeFeatureConfig,
     tool_registry: &GlobalToolRegistry,
-) -> PermissionPolicy {
-    tool_registry.permission_specs(None).into_iter().fold(
+) -> Result<PermissionPolicy, String> {
+    Ok(tool_registry.permission_specs(None)?.into_iter().fold(
         PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules()),
         |policy, (name, required_permission)| {
             policy.with_tool_requirement(name, required_permission)
         },
-    )
+    ))
 }
 
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
@@ -5391,7 +5392,8 @@ mod tests {
             PermissionMode::ReadOnly,
             &feature_config,
             &registry_with_plugin_tool(),
-        );
+        )
+        .expect("permission policy should build");
         let required = policy.required_mode_for("plugin_echo");
         assert_eq!(required, PermissionMode::WorkspaceWrite);
     }
