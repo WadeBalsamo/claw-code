@@ -4,7 +4,6 @@ mod render;
 
 use std::collections::BTreeSet;
 use std::env;
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -18,8 +17,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use api::{
     resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
     InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
-    SessionTracer, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 
 use commands::{
@@ -52,7 +50,6 @@ fn max_tokens_for_model(model: &str) -> u32 {
 }
 const DEFAULT_DATE: &str = "2026-03-31";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
-const TELEMETRY_LOG_PATH_ENV: &str = "CLAW_TELEMETRY_LOG_PATH";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
@@ -3290,10 +3287,6 @@ impl AnthropicRuntimeClient {
         })
     }
 
-    fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
-        self.client = self.client.with_session_tracer(session_tracer);
-        self
-    }
 }
 
 fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
@@ -3520,23 +3513,6 @@ fn collect_prompt_cache_events(summary: &runtime::TurnSummary) -> Vec<serde_json
             })
         })
         .collect()
-}
-
-fn print_prompt_cache_events(summary: &runtime::TurnSummary) {
-    for event in &summary.prompt_cache_events {
-        let label = if event.unexpected {
-            "Prompt cache break"
-        } else {
-            "Prompt cache invalidation"
-        };
-        println!(
-            "{label}: {} (cache read {} -> {}, drop {})",
-            event.reason,
-            event.previous_cache_read_input_tokens,
-            event.current_cache_read_input_tokens,
-            event.token_drop,
-        );
-    }
 }
 
 fn slash_command_completion_candidates() -> Vec<String> {
