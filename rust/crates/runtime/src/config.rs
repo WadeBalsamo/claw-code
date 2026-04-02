@@ -1053,7 +1053,9 @@ mod tests {
             .to_string()
             .contains("top-level settings value must be a JSON object"));
 
-        fs::remove_dir_all(root).expect("cleanup temp dir");
+        if root.exists() {
+            fs::remove_dir_all(root).expect("cleanup temp dir");
+        }
     }
 
     #[test]

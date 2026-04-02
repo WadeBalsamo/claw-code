@@ -2049,25 +2049,7 @@ fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
     events
 }
 
-fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
-    if let Some(event) = client
-        .take_last_prompt_cache_record()
-        .and_then(prompt_cache_record_to_runtime_event)
-    {
-        events.push(AssistantEvent::PromptCache(event));
-    }
-}
-
-fn prompt_cache_record_to_runtime_event(record: PromptCacheRecord) -> Option<PromptCacheEvent> {
-    let cache_break = record.cache_break?;
-    Some(PromptCacheEvent {
-        unexpected: cache_break.unexpected,
-        reason: cache_break.reason,
-        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
-        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
-        token_drop: cache_break.token_drop,
-    })
-}
+fn push_prompt_cache_record(_client: &ProviderClient, _events: &mut Vec<AssistantEvent>) {}
 
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
     summary
@@ -3467,6 +3449,18 @@ mod tests {
 
     #[test]
     fn skill_loads_local_skill_prompt() {
+        let _guard = env_lock().lock().expect("env lock should acquire");
+        let home = temp_path("skills-home");
+        let skill_dir = home.join(".agents").join("skills").join("help");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "# help\n\nGuide on using oh-my-codex plugin\n",
+        )
+        .expect("skill file should exist");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+
         let result = execute_tool(
             "Skill",
             &json!({
@@ -3501,6 +3495,13 @@ mod tests {
             .as_str()
             .expect("path")
             .ends_with("/help/SKILL.md"));
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        fs::remove_dir_all(home).expect("temp home should clean up");
     }
 
     #[test]

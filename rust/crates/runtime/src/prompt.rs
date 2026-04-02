@@ -513,6 +513,13 @@ mod tests {
         crate::test_env_lock()
     }
 
+    fn ensure_valid_cwd() {
+        if std::env::current_dir().is_err() {
+            std::env::set_current_dir(env!("CARGO_MANIFEST_DIR"))
+                .expect("test cwd should be recoverable");
+        }
+    }
+
     #[test]
     fn discovers_instruction_files_from_ancestor_chain() {
         let root = temp_dir();
@@ -601,6 +608,7 @@ mod tests {
     #[test]
     fn discover_with_git_includes_status_snapshot() {
         let _guard = env_lock();
+        ensure_valid_cwd();
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
         std::process::Command::new("git")
@@ -626,6 +634,7 @@ mod tests {
     #[test]
     fn discover_with_git_includes_diff_snapshot_for_tracked_changes() {
         let _guard = env_lock();
+        ensure_valid_cwd();
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
         std::process::Command::new("git")
@@ -678,6 +687,7 @@ mod tests {
         .expect("write settings");
 
         let _guard = env_lock();
+        ensure_valid_cwd();
         let previous = std::env::current_dir().expect("cwd");
         let original_home = std::env::var("HOME").ok();
         let original_claw_home = std::env::var("CLAW_CONFIG_HOME").ok();
