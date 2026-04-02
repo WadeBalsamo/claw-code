@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
     resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
     SessionTracer, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
     ToolResultContentBlock,
 };
@@ -34,7 +34,7 @@ use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
     parse_oauth_callback_request_target, resolve_sandbox_status, save_oauth_credentials,
     ApiClient, ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource,
-    ContentBlock, ConversationMessage, ConversationRuntime, MessageRole,
+    ContentBlock, ConversationMessage, ConversationRuntime, MessageRole, PromptCacheEvent,
     OAuthAuthorizationRequest, OAuthConfig,
     OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
     Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
@@ -3154,6 +3154,7 @@ fn build_runtime(
     let mut runtime = ConversationRuntime::new_with_features(
         session,
         AnthropicRuntimeClient::new(
+            session_id,
             model,
             enable_tools,
             emit_output,
@@ -3267,6 +3268,7 @@ struct AnthropicRuntimeClient {
 
 impl AnthropicRuntimeClient {
     fn new(
+        session_id: &str,
         model: String,
         enable_tools: bool,
         emit_output: bool,
@@ -3277,7 +3279,8 @@ impl AnthropicRuntimeClient {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url()),
+                .with_base_url(api::read_base_url())
+                .with_prompt_cache(PromptCache::new(session_id)),
             model,
             enable_tools,
             emit_output,
@@ -4036,7 +4039,24 @@ fn response_to_events(
     Ok(events)
 }
 
-fn push_prompt_cache_record(_client: &AnthropicClient, _events: &mut Vec<AssistantEvent>) {}
+fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
+    if let Some(record) = client.take_last_prompt_cache_record() {
+        if let Some(event) = prompt_cache_record_to_runtime_event(record) {
+            events.push(AssistantEvent::PromptCache(event));
+        }
+    }
+}
+
+fn prompt_cache_record_to_runtime_event(record: api::PromptCacheRecord) -> Option<PromptCacheEvent> {
+    let cache_break = record.cache_break?;
+    Some(PromptCacheEvent {
+        unexpected: cache_break.unexpected,
+        reason: cache_break.reason,
+        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
+        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
+        token_drop: cache_break.token_drop,
+    })
+}
 
 struct CliToolExecutor {
     renderer: TerminalRenderer,

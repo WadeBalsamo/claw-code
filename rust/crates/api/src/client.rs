@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AuthSource};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
 use crate::providers::{self, Provider, ProviderKind};
@@ -55,6 +56,30 @@ impl ProviderClient {
             Self::Anthropic(_) => ProviderKind::Anthropic,
             Self::Xai(_) => ProviderKind::Xai,
             Self::OpenAi(_) => ProviderKind::OpenAi,
+        }
+    }
+
+    #[must_use]
+    pub fn with_prompt_cache(self, prompt_cache: PromptCache) -> Self {
+        match self {
+            Self::Anthropic(client) => Self::Anthropic(client.with_prompt_cache(prompt_cache)),
+            other => other,
+        }
+    }
+
+    #[must_use]
+    pub fn prompt_cache_stats(&self) -> Option<PromptCacheStats> {
+        match self {
+            Self::Anthropic(client) => client.prompt_cache_stats(),
+            Self::Xai(_) | Self::OpenAi(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn take_last_prompt_cache_record(&self) -> Option<PromptCacheRecord> {
+        match self {
+            Self::Anthropic(client) => client.take_last_prompt_cache_record(),
+            Self::Xai(_) | Self::OpenAi(_) => None,
         }
     }
 
