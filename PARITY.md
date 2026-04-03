@@ -2,6 +2,12 @@
 
 Last updated: 2026-04-03 (`03bd7f0`)
 
+## Mock parity harness — milestone 1
+
+- [x] Deterministic Anthropic-compatible mock service (`rust/crates/mock-anthropic-service`)
+- [x] Reproducible clean-environment CLI harness (`rust/crates/rusty-claude-cli/tests/mock_parity_harness.rs`)
+- [x] Scripted scenarios: `streaming_text`, `read_file_roundtrip`, `grep_chunk_assembly`, `write_file_allowed`, `write_file_denied`
+
 ## Tool Surface: 40/40 (spec parity)
 
 ### Real Implementations (behavioral parity — varying depth)
@@ -90,7 +96,7 @@ Last updated: 2026-04-03 (`03bd7f0`)
 - [ ] Output truncation (large stdout/file content)
 - [ ] Session compaction behavior matching
 - [ ] Token counting / cost tracking accuracy
-- [ ] Streaming response support
+- [x] Streaming response support validated by the mock parity harness
 
 ## Migration Readiness
 
