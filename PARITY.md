@@ -1,12 +1,30 @@
 # Parity Status — claw-code Rust Port
 
-Last updated: 2026-04-03 (`03bd7f0`)
+Last updated: 2026-04-03
 
 ## Mock parity harness — milestone 1
 
 - [x] Deterministic Anthropic-compatible mock service (`rust/crates/mock-anthropic-service`)
 - [x] Reproducible clean-environment CLI harness (`rust/crates/rusty-claude-cli/tests/mock_parity_harness.rs`)
 - [x] Scripted scenarios: `streaming_text`, `read_file_roundtrip`, `grep_chunk_assembly`, `write_file_allowed`, `write_file_denied`
+
+## Mock parity harness — milestone 2 (behavioral expansion)
+
+- [x] Scripted multi-tool turn coverage: `multi_tool_turn_roundtrip`
+- [x] Scripted bash coverage: `bash_stdout_roundtrip`
+- [x] Scripted permission prompt coverage: `bash_permission_prompt_approved`, `bash_permission_prompt_denied`
+- [x] Scripted plugin-path coverage: `plugin_tool_roundtrip`
+- [x] Behavioral diff/checklist runner: `rust/scripts/run_mock_parity_diff.py`
+
+## Harness v2 behavioral checklist
+
+Canonical scenario map: `rust/mock_parity_scenarios.json`
+
+- Multi-tool assistant turns
+- Bash flow roundtrips
+- Permission enforcement across tool paths
+- Plugin tool execution path
+- File tools — harness-validated flows
 
 ## Tool Surface: 40/40 (spec parity)
 
@@ -79,16 +97,22 @@ Last updated: 2026-04-03 (`03bd7f0`)
 - [ ] `modeValidation` — validate against current permission mode
 - [ ] `shouldUseSandbox` — sandbox decision logic
 
+Harness note: milestone 2 validates bash success plus workspace-write escalation approve/deny flows, but the deeper validation/security submodules above are still open.
+
 **File tools — need verification:**
 - [ ] Path traversal prevention (symlink following, ../ escapes)
 - [ ] Size limits on read/write
 - [ ] Binary file detection
 - [ ] Permission mode enforcement (read-only vs workspace-write)
 
+Harness note: read_file, grep_search, write_file allow/deny, and multi-tool same-turn assembly are now covered by the mock parity harness.
+
 **Config/Plugin/MCP flows:**
 - [ ] Full MCP server lifecycle (connect, list tools, call tool, disconnect)
 - [ ] Plugin install/enable/disable/uninstall full flow
 - [ ] Config merge precedence (user > project > local)
+
+Harness note: external plugin discovery + execution is now covered via `plugin_tool_roundtrip`; full lifecycle and MCP behavior remain open.
 
 ## Runtime Behavioral Gaps
 
@@ -97,6 +121,8 @@ Last updated: 2026-04-03 (`03bd7f0`)
 - [ ] Session compaction behavior matching
 - [ ] Token counting / cost tracking accuracy
 - [x] Streaming response support validated by the mock parity harness
+
+Harness note: current coverage now includes write-file denial, bash escalation approve/deny, and plugin workspace-write execution paths.
 
 ## Migration Readiness
 
