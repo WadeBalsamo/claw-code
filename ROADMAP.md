@@ -288,7 +288,7 @@ Priority order: P0 = blocks CI/green state, P1 = blocks integration wiring, P2 =
 11. Structured task packet format — **done**: `task_packet.rs` module with `TaskPacket` struct, validation, serialization, `TaskScope` resolution (workspace/module/single-file/custom), integrated into `tools/src/lib.rs`
 12. Lane board / machine-readable status API — **done**: Lane completion hardening + `LaneContext::completed` auto-detection + MCP degraded reporting surface machine-readable state
 13. **Session completion failure classification** — **done**: `WorkerFailureKind::Provider` + `observe_completion()` + recovery recipe bridge landed
-14. **Config merge validation gap** — merged settings (especially `hooks`) can produce non-string array values that fail validation at `claw --help` time; error path: `deep_merge_objects()` → malformed hooks → `optional_string_array()` parse error
+14. **Config merge validation gap** — **done**: `config.rs` hook validation before deep-merge (+56 lines), malformed entries fail with source-path context instead of merged parse errors
 15. **MCP manager discovery flaky test** — `manager_discovery_report_keeps_healthy_servers_when_one_server_fails` has intermittent timing issues in CI; temporarily ignored, needs root cause fix
 
 **P3 — Swarm efficiency**
