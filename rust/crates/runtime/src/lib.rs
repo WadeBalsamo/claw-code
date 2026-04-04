@@ -143,8 +143,9 @@ pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };
 pub use worker_boot::{
-    Worker, WorkerEvent, WorkerEventKind, WorkerFailure, WorkerFailureKind, WorkerReadySnapshot,
-    WorkerRegistry, WorkerStatus,
+    Worker, WorkerEvent, WorkerEventKind, WorkerEventPayload, WorkerFailure, WorkerFailureKind,
+    WorkerPromptTarget, WorkerReadySnapshot, WorkerRegistry, WorkerStatus,
+    WorkerTrustResolution,
 };
 
 #[cfg(test)]
