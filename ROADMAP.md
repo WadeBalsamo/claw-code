@@ -287,7 +287,8 @@ Priority order: P0 = blocks CI/green state, P1 = blocks integration wiring, P2 =
 10. MCP structured degraded-startup reporting
 11. Structured task packet format
 12. Lane board / machine-readable status API
-13. **Session completion failure classification** — sessions that complete with `finish: "unknown"` or zero output (provider errors, context exhaustion, etc.) are not classified by `WorkerFailureKind`; worker boot state machine cannot surface these as structured failures for recovery policy
+13. **Session completion failure classification** — **done**: `WorkerFailureKind::Provider` + `observe_completion()` + recovery recipe bridge landed
+14. **Config merge validation gap** — merged settings (especially `hooks`) can produce non-string array values that fail validation at `claw --help` time; error path: `deep_merge_objects()` → malformed hooks → `optional_string_array()` parse error
 
 **P3 — Swarm efficiency**
 13. Swarm branch-lock protocol — detect same-module/same-branch collision before parallel workers drift into duplicate implementation
