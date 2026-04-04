@@ -275,7 +275,7 @@ Priority order: P0 = blocks CI/green state, P1 = blocks integration wiring, P2 =
 
 **P1 — Next (integration wiring, unblocks verification)**
 2. Add cross-module integration tests — **done**: 12 integration tests covering worker→recovery→policy, stale_branch→policy, green_contract→policy, reconciliation flows
-3. Wire lane-completion emitter — `LaneContext::completed` is a passive bool; nothing sets it automatically; need a runtime path from push+green+session-done to policy engine lane-closeout
+3. Wire lane-completion emitter — **done**: `lane_completion` module with `detect_lane_completion()` auto-sets `LaneContext::completed` from session-finished + tests-green + push-complete → policy closeout
 4. Wire `SummaryCompressor` into the lane event pipeline — **done**: `compress_summary_text()` feeds into `LaneEvent::Finished` detail field in `tools/src/lib.rs`
 
 **P2 — Clawability hardening (original backlog)**
