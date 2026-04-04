@@ -100,7 +100,7 @@ pub use plugin_lifecycle::{
 };
 pub use policy_engine::{
     evaluate, DiffScope, GreenLevel, LaneBlocker, LaneContext, PolicyAction, PolicyCondition,
-    PolicyEngine, PolicyRule, ReviewStatus,
+    PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
     load_system_prompt, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,

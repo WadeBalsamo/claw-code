@@ -2144,6 +2144,14 @@ enum LaneEventName {
     Finished,
     #[serde(rename = "lane.failed")]
     Failed,
+    #[serde(rename = "lane.reconciled")]
+    Reconciled,
+    #[serde(rename = "lane.merged")]
+    Merged,
+    #[serde(rename = "lane.superseded")]
+    Superseded,
+    #[serde(rename = "lane.closed")]
+    Closed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

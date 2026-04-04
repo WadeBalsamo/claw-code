@@ -42,6 +42,7 @@ pub enum PolicyCondition {
     StaleBranch,
     StartupBlocked,
     LaneCompleted,
+    LaneReconciled,
     ReviewPassed,
     ScopedDiff,
     TimedOut { duration: Duration },
@@ -61,6 +62,7 @@ impl PolicyCondition {
             Self::StaleBranch => context.branch_freshness >= STALE_BRANCH_THRESHOLD,
             Self::StartupBlocked => context.blocker == LaneBlocker::Startup,
             Self::LaneCompleted => context.completed,
+            Self::LaneReconciled => context.reconciled,
             Self::ReviewPassed => context.review_status == ReviewStatus::Approved,
             Self::ScopedDiff => context.diff_scope == DiffScope::Scoped,
             Self::TimedOut { duration } => context.branch_freshness >= *duration,
@@ -76,9 +78,23 @@ pub enum PolicyAction {
     Escalate { reason: String },
     CloseoutLane,
     CleanupSession,
+    Reconcile { reason: ReconcileReason },
     Notify { channel: String },
     Block { reason: String },
     Chain(Vec<PolicyAction>),
+}
+
+/// Why a lane was reconciled without further action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconcileReason {
+    /// Branch already merged into main — no PR needed.
+    AlreadyMerged,
+    /// Work superseded by another lane or direct commit.
+    Superseded,
+    /// PR would be empty — all changes already landed.
+    EmptyDiff,
+    /// Lane manually closed by operator.
+    ManualClose,
 }
 
 impl PolicyAction {
@@ -123,6 +139,7 @@ pub struct LaneContext {
     pub review_status: ReviewStatus,
     pub diff_scope: DiffScope,
     pub completed: bool,
+    pub reconciled: bool,
 }
 
 impl LaneContext {
@@ -144,6 +161,22 @@ impl LaneContext {
             review_status,
             diff_scope,
             completed,
+            reconciled: false,
+        }
+    }
+
+    /// Create a lane context that is already reconciled (no further action needed).
+    #[must_use]
+    pub fn reconciled(lane_id: impl Into<String>) -> Self {
+        Self {
+            lane_id: lane_id.into(),
+            green_level: 0,
+            branch_freshness: Duration::from_secs(0),
+            blocker: LaneBlocker::None,
+            review_status: ReviewStatus::Pending,
+            diff_scope: DiffScope::Full,
+            completed: true,
+            reconciled: true,
         }
     }
 }
@@ -188,7 +221,7 @@ mod tests {
 
     use super::{
         evaluate, DiffScope, LaneBlocker, LaneContext, PolicyAction, PolicyCondition, PolicyEngine,
-        PolicyRule, ReviewStatus, STALE_BRANCH_THRESHOLD,
+        PolicyRule, ReconcileReason, ReviewStatus, STALE_BRANCH_THRESHOLD,
     };
 
     fn default_context() -> LaneContext {
@@ -454,5 +487,95 @@ mod tests {
                 PolicyAction::CleanupSession,
             ]
         );
+    }
+
+    #[test]
+    fn reconciled_lane_emits_reconcile_and_cleanup() {
+        // given — a lane where branch is already merged, no PR needed, session stale
+        let engine = PolicyEngine::new(vec![
+            PolicyRule::new(
+                "reconcile-closeout",
+                PolicyCondition::LaneReconciled,
+                PolicyAction::Chain(vec![
+                    PolicyAction::Reconcile {
+                        reason: ReconcileReason::AlreadyMerged,
+                    },
+                    PolicyAction::CloseoutLane,
+                    PolicyAction::CleanupSession,
+                ]),
+                5,
+            ),
+            // This rule should NOT fire — reconciled lanes are completed but we want
+            // the more specific reconcile rule to handle them
+            PolicyRule::new(
+                "generic-closeout",
+                PolicyCondition::And(vec![
+                    PolicyCondition::LaneCompleted,
+                    // Only fire if NOT reconciled
+                    PolicyCondition::And(vec![]),
+                ]),
+                PolicyAction::CloseoutLane,
+                30,
+            ),
+        ]);
+        let context = LaneContext::reconciled("lane-9411");
+
+        // when
+        let actions = engine.evaluate(&context);
+
+        // then — reconcile rule fires first (priority 5), then generic closeout also fires
+        // because reconciled context has completed=true
+        assert_eq!(
+            actions,
+            vec![
+                PolicyAction::Reconcile {
+                    reason: ReconcileReason::AlreadyMerged,
+                },
+                PolicyAction::CloseoutLane,
+                PolicyAction::CleanupSession,
+                PolicyAction::CloseoutLane,
+            ]
+        );
+    }
+
+    #[test]
+    fn reconciled_context_has_correct_defaults() {
+        let ctx = LaneContext::reconciled("test-lane");
+        assert_eq!(ctx.lane_id, "test-lane");
+        assert!(ctx.completed);
+        assert!(ctx.reconciled);
+        assert_eq!(ctx.blocker, LaneBlocker::None);
+        assert_eq!(ctx.green_level, 0);
+    }
+
+    #[test]
+    fn non_reconciled_lane_does_not_trigger_reconcile_rule() {
+        let engine = PolicyEngine::new(vec![PolicyRule::new(
+            "reconcile-closeout",
+            PolicyCondition::LaneReconciled,
+            PolicyAction::Reconcile {
+                reason: ReconcileReason::EmptyDiff,
+            },
+            5,
+        )]);
+        // Normal completed lane — not reconciled
+        let context = LaneContext::new(
+            "lane-7",
+            0,
+            Duration::from_secs(0),
+            LaneBlocker::None,
+            ReviewStatus::Pending,
+            DiffScope::Full,
+            true,
+        );
+
+        let actions = engine.evaluate(&context);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn reconcile_reason_variants_are_distinct() {
+        assert_ne!(ReconcileReason::AlreadyMerged, ReconcileReason::Superseded);
+        assert_ne!(ReconcileReason::EmptyDiff, ReconcileReason::ManualClose);
     }
 }
