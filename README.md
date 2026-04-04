@@ -23,13 +23,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sponsors/instructkr"><img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github&style=for-the-badge" alt="Sponsor on GitHub" /></a>
+  <a href="https://github.com/Yeachan-Heo/clawhip">clawhip</a> ·
+  <a href="https://github.com/code-yeongyu/oh-my-openagent">oh-my-openagent</a> ·
+  <a href="https://github.com/Yeachan-Heo/oh-my-claudecode">oh-my-claudecode</a> ·
+  <a href="https://github.com/Yeachan-Heo/oh-my-codex">oh-my-codex</a> ·
+  <a href="https://discord.gg/6ztZB9jvWq">UltraWorkers Discord</a>
 </p>
 
 > [!IMPORTANT]
 > The active Rust workspace now lives in [`rust/`](./rust). Start with [`USAGE.md`](./USAGE.md) for build, auth, CLI, session, and parity-harness workflows, then use [`rust/README.md`](./rust/README.md) for crate-level details.
 
-> If you find this work useful, consider [sponsoring @instructkr on GitHub](https://github.com/sponsors/instructkr) to support continued open-source harness engineering research.
+> Shout-out to the UltraWorkers ecosystem powering this repo: [clawhip](https://github.com/Yeachan-Heo/clawhip), [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent), [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode), [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex), and the [UltraWorkers Discord](https://discord.gg/6ztZB9jvWq).
 
 ---
 
