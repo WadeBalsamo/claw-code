@@ -279,8 +279,8 @@ Priority order: P0 = blocks CI/green state, P1 = blocks integration wiring, P2 =
 4. Wire `SummaryCompressor` into the lane event pipeline — **done**: `compress_summary_text()` feeds into `LaneEvent::Finished` detail field in `tools/src/lib.rs`
 
 **P2 — Clawability hardening (original backlog)**
-5. Worker readiness handshake + trust resolution
-6. Prompt misdelivery detection and recovery
+5. Worker readiness handshake + trust resolution — **done**: `WorkerStatus` state machine with `Spawning` → `TrustRequired` → `ReadyForPrompt` → `PromptAccepted` → `Running` lifecycle, `trust_auto_resolve` + `trust_gate_cleared` gating
+6. Prompt misdelivery detection and recovery — **done**: `prompt_delivery_attempts` counter, `PromptMisdelivery` event detection, `auto_recover_prompt_misdelivery` + `replay_prompt` recovery arm
 7. Canonical lane event schema in clawhip
 8. Failure taxonomy + blocker normalization
 9. Stale-branch detection before workspace tests
