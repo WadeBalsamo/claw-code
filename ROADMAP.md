@@ -289,6 +289,7 @@ Priority order: P0 = blocks CI/green state, P1 = blocks integration wiring, P2 =
 12. Lane board / machine-readable status API
 13. **Session completion failure classification** — **done**: `WorkerFailureKind::Provider` + `observe_completion()` + recovery recipe bridge landed
 14. **Config merge validation gap** — merged settings (especially `hooks`) can produce non-string array values that fail validation at `claw --help` time; error path: `deep_merge_objects()` → malformed hooks → `optional_string_array()` parse error
+15. **MCP manager discovery flaky test** — `manager_discovery_report_keeps_healthy_servers_when_one_server_fails` has intermittent timing issues in CI; temporarily ignored, needs root cause fix
 
 **P3 — Swarm efficiency**
 13. Swarm branch-lock protocol — detect same-module/same-branch collision before parallel workers drift into duplicate implementation

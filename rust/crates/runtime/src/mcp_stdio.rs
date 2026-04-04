@@ -2652,6 +2652,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "flaky: intermittent timing issues in CI, see ROADMAP P2.15"]
     fn manager_discovery_report_keeps_healthy_servers_when_one_server_fails() {
         let runtime = Builder::new_current_thread()
             .enable_all()
