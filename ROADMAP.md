@@ -276,6 +276,7 @@ Priority order: P0 = blocks CI/green state, P1 = blocks integration wiring, P2 =
 3. Add release-grade binary workflow — repo has a Rust CLI and release intent, but no GitHub Actions path that builds tagged artifacts / checks release packaging before a publish step
 4. Add container-first test/run docs — runtime detects Docker/Podman/container state, but docs do not show a canonical container workflow for `cargo test --workspace`, binary execution, or bind-mounted repo usage
 5. Surface `doctor` / preflight diagnostics in onboarding docs and help — the CLI already has setup-diagnosis commands and branch preflight machinery, but they are not prominent enough in README/USAGE, so new users still ask manual setup questions instead of running a built-in health check first
+6. Add branding/source-of-truth residue checks for docs — after repo migration, old org names can survive in badges, star-history URLs, and copied snippets; docs need a consistency pass or CI lint to catch stale branding automatically
 
 **P1 — Next (integration wiring, unblocks verification)**
 2. Add cross-module integration tests — **done**: 12 integration tests covering worker→recovery→policy, stale_branch→policy, green_contract→policy, reconciliation flows
