@@ -18,12 +18,14 @@ use crate::usage::{TokenUsage, UsageTracker};
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 
+/// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
     pub system_prompt: Vec<String>,
     pub messages: Vec<ConversationMessage>,
 }
 
+/// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
     TextDelta(String),
@@ -37,6 +39,7 @@ pub enum AssistantEvent {
     MessageStop,
 }
 
+/// Prompt-cache telemetry captured from the provider response stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptCacheEvent {
     pub unexpected: bool,
@@ -46,14 +49,17 @@ pub struct PromptCacheEvent {
     pub token_drop: u32,
 }
 
+/// Minimal streaming API contract required by [`ConversationRuntime`].
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 }
 
+/// Trait implemented by tool dispatchers that execute model-requested tools.
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 }
 
+/// Error returned when a tool invocation fails locally.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
     message: String,
@@ -76,6 +82,7 @@ impl Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
+/// Error returned when a conversation turn cannot be completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
     message: String,
@@ -98,6 +105,7 @@ impl Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+/// Summary of one completed runtime turn, including tool results and usage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnSummary {
     pub assistant_messages: Vec<ConversationMessage>,
@@ -108,11 +116,13 @@ pub struct TurnSummary {
     pub auto_compaction: Option<AutoCompactionEvent>,
 }
 
+/// Details about automatic session compaction applied during a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoCompactionEvent {
     pub removed_message_count: usize,
 }
 
+/// Coordinates the model loop, tool execution, hooks, and session updates.
 pub struct ConversationRuntime<C, T> {
     session: Session,
     api_client: C,
@@ -637,6 +647,7 @@ where
     }
 }
 
+/// Reads the automatic compaction threshold from the environment.
 #[must_use]
 pub fn auto_compaction_threshold_from_env() -> u32 {
     parse_auto_compaction_threshold(
@@ -739,6 +750,7 @@ fn merge_hook_feedback(messages: &[String], output: String, is_error: bool) -> S
 
 type ToolHandler = Box<dyn FnMut(&str) -> Result<String, ToolError>>;
 
+/// Simple in-memory tool executor for tests and lightweight integrations.
 #[derive(Default)]
 pub struct StaticToolExecutor {
     handlers: BTreeMap<String, ToolHandler>,

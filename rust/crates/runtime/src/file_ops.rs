@@ -42,6 +42,7 @@ fn validate_workspace_boundary(resolved: &Path, workspace_root: &Path) -> io::Re
     Ok(())
 }
 
+/// Text payload returned by file-reading operations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextFilePayload {
     #[serde(rename = "filePath")]
@@ -55,6 +56,7 @@ pub struct TextFilePayload {
     pub total_lines: usize,
 }
 
+/// Output envelope for the `read_file` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadFileOutput {
     #[serde(rename = "type")]
@@ -62,6 +64,7 @@ pub struct ReadFileOutput {
     pub file: TextFilePayload,
 }
 
+/// Structured patch hunk emitted by write and edit operations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StructuredPatchHunk {
     #[serde(rename = "oldStart")]
@@ -75,6 +78,7 @@ pub struct StructuredPatchHunk {
     pub lines: Vec<String>,
 }
 
+/// Output envelope for full-file write operations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WriteFileOutput {
     #[serde(rename = "type")]
@@ -90,6 +94,7 @@ pub struct WriteFileOutput {
     pub git_diff: Option<serde_json::Value>,
 }
 
+/// Output envelope for targeted string-replacement edits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EditFileOutput {
     #[serde(rename = "filePath")]
@@ -110,6 +115,7 @@ pub struct EditFileOutput {
     pub git_diff: Option<serde_json::Value>,
 }
 
+/// Result of a glob-based filename search.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobSearchOutput {
     #[serde(rename = "durationMs")]
@@ -120,6 +126,7 @@ pub struct GlobSearchOutput {
     pub truncated: bool,
 }
 
+/// Parameters accepted by the grep-style search tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrepSearchInput {
     pub pattern: String,
@@ -145,6 +152,7 @@ pub struct GrepSearchInput {
     pub multiline: Option<bool>,
 }
 
+/// Result payload returned by the grep-style search tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrepSearchOutput {
     pub mode: Option<String>,
@@ -162,6 +170,7 @@ pub struct GrepSearchOutput {
     pub applied_offset: Option<usize>,
 }
 
+/// Reads a text file and returns a line-windowed payload.
 pub fn read_file(
     path: &str,
     offset: Option<usize>,
@@ -210,6 +219,7 @@ pub fn read_file(
     })
 }
 
+/// Replaces a file's contents and returns patch metadata.
 pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     if content.len() > MAX_WRITE_SIZE {
         return Err(io::Error::new(
@@ -243,6 +253,7 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     })
 }
 
+/// Performs an in-file string replacement and returns patch metadata.
 pub fn edit_file(
     path: &str,
     old_string: &str,
@@ -283,6 +294,7 @@ pub fn edit_file(
     })
 }
 
+/// Expands a glob pattern and returns matching filenames.
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
     let base_dir = path
@@ -326,6 +338,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     })
 }
 
+/// Runs a regex search over workspace files with optional context lines.
 pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let base_path = input
         .path

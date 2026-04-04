@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::config::RuntimePermissionRuleConfig;
 
+/// Permission level assigned to a tool invocation or runtime session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionMode {
     ReadOnly,
@@ -26,6 +27,7 @@ impl PermissionMode {
     }
 }
 
+/// Hook-provided override applied before standard permission evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionOverride {
     Allow,
@@ -33,6 +35,7 @@ pub enum PermissionOverride {
     Ask,
 }
 
+/// Additional permission context supplied by hooks or higher-level orchestration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PermissionContext {
     override_decision: Option<PermissionOverride>,
@@ -62,6 +65,7 @@ impl PermissionContext {
     }
 }
 
+/// Full authorization request presented to a permission prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequest {
     pub tool_name: String,
@@ -71,22 +75,26 @@ pub struct PermissionRequest {
     pub reason: Option<String>,
 }
 
+/// User-facing decision returned by a [`PermissionPrompter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionPromptDecision {
     Allow,
     Deny { reason: String },
 }
 
+/// Prompting interface used when policy requires interactive approval.
 pub trait PermissionPrompter {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
 }
 
+/// Final authorization result after evaluating static rules and prompts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionOutcome {
     Allow,
     Deny { reason: String },
 }
 
+/// Evaluates permission mode requirements plus allow/deny/ask rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionPolicy {
     active_mode: PermissionMode,
