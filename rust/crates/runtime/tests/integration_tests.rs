@@ -282,3 +282,104 @@ fn fresh_approved_lane_gets_merge_action() {
     let actions = engine.evaluate(&context);
     assert_eq!(actions, vec![PolicyAction::MergeToDev]);
 }
+
+/// worker_boot + recovery_recipes + policy_engine integration:
+/// When a session completes with a provider failure, does the worker
+/// status transition trigger the correct recovery recipe, and does
+/// the resulting recovery state feed into policy decisions?
+#[test]
+fn worker_provider_failure_flows_through_recovery_to_policy() {
+    use runtime::recovery_recipes::{
+        attempt_recovery, FailureScenario, RecoveryContext, RecoveryResult, RecoveryStep,
+    };
+    use runtime::worker_boot::{WorkerFailureKind, WorkerRegistry, WorkerStatus};
+
+    // given — a worker that encounters a provider failure during session completion
+    let registry = WorkerRegistry::new();
+    let worker = registry.create("/tmp/repo-recovery-test", &[], true);
+
+    // Worker reaches ready state
+    registry
+        .observe(&worker.worker_id, "Ready for your input\n>")
+        .expect("ready observe should succeed");
+    registry
+        .send_prompt(&worker.worker_id, Some("Run analysis"))
+        .expect("prompt send should succeed");
+
+    // Session completes with provider failure (finish="unknown", tokens=0)
+    let failed_worker = registry
+        .observe_completion(&worker.worker_id, "unknown", 0)
+        .expect("completion observe should succeed");
+    assert_eq!(failed_worker.status, WorkerStatus::Failed);
+    let failure = failed_worker
+        .last_error
+        .expect("worker should have recorded error");
+    assert_eq!(failure.kind, WorkerFailureKind::Provider);
+
+    // Bridge: WorkerFailureKind -> FailureScenario
+    let scenario = FailureScenario::from_worker_failure_kind(failure.kind);
+    assert_eq!(scenario, FailureScenario::ProviderFailure);
+
+    // Recovery recipe lookup and execution
+    let mut ctx = RecoveryContext::new();
+    let result = attempt_recovery(&scenario, &mut ctx);
+
+    // then — recovery should recommend RestartWorker step
+    assert!(
+        matches!(result, RecoveryResult::Recovered { steps_taken: 1 }),
+        "provider failure should recover via single RestartWorker step, got: {result:?}"
+    );
+    assert!(
+        ctx.events().iter().any(|e| {
+            matches!(
+                e,
+                runtime::recovery_recipes::RecoveryEvent::RecoveryAttempted {
+                    result: RecoveryResult::Recovered { steps_taken: 1 },
+                    ..
+                }
+            )
+        }),
+        "recovery should emit structured attempt event"
+    );
+
+    // Policy integration: recovery success + green status = merge-ready
+    // (Simulating the policy check that would happen after successful recovery)
+    let recovery_success = matches!(result, RecoveryResult::Recovered { .. });
+    let green_level = 3; // Workspace green
+    let not_stale = Duration::from_secs(30 * 60); // 30 min — fresh
+
+    let post_recovery_context = LaneContext::new(
+        "recovered-lane",
+        green_level,
+        not_stale,
+        LaneBlocker::None,
+        ReviewStatus::Approved,
+        DiffScope::Scoped,
+        false,
+    );
+
+    let policy_engine = PolicyEngine::new(vec![
+        // Rule: if recovered from failure + green + approved -> merge
+        PolicyRule::new(
+            "merge-after-successful-recovery",
+            PolicyCondition::And(vec![
+                PolicyCondition::GreenAt { level: 3 },
+                PolicyCondition::ReviewPassed,
+            ]),
+            PolicyAction::MergeToDev,
+            10,
+        ),
+    ]);
+
+    // Recovery success is a pre-condition; policy evaluates post-recovery context
+    assert!(
+        recovery_success,
+        "recovery must succeed for lane to proceed"
+    );
+    let actions = policy_engine.evaluate(&post_recovery_context);
+    assert_eq!(
+        actions,
+        vec![PolicyAction::MergeToDev],
+        "post-recovery green+approved lane should be merge-ready"
+    );
+}
