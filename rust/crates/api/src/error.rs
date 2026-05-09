@@ -70,6 +70,21 @@ pub enum ApiError {
         max_bytes: usize,
         provider: &'static str,
     },
+    LocalModelUnloaded {
+        provider: String,
+        model: String,
+        attempt: u32,
+    },
+    EmptyAssistantStream {
+        provider: String,
+        model: String,
+        attempt: u32,
+    },
+    FirstTokenTimeout {
+        provider: String,
+        model: String,
+        timeout_ms: u64,
+    },
 }
 
 impl ApiError {
@@ -128,6 +143,9 @@ impl ApiError {
             Self::Http(error) => error.is_connect() || error.is_timeout() || error.is_request(),
             Self::Api { retryable, .. } => *retryable,
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
+            Self::LocalModelUnloaded { .. }
+            | Self::EmptyAssistantStream { .. }
+            | Self::FirstTokenTimeout { .. } => true,
             Self::MissingCredentials { .. }
             | Self::ContextWindowExceeded { .. }
             | Self::ExpiredOAuthToken
@@ -156,7 +174,10 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => None,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::LocalModelUnloaded { .. }
+            | Self::EmptyAssistantStream { .. }
+            | Self::FirstTokenTimeout { .. } => None,
         }
     }
 
@@ -182,6 +203,9 @@ impl ApiError {
             }
             Self::InvalidApiKeyEnv(_) | Self::Io(_) | Self::Json { .. } => "runtime_io",
             Self::RequestBodySizeExceeded { .. } => "request_size",
+            Self::LocalModelUnloaded { .. }
+            | Self::EmptyAssistantStream { .. }
+            | Self::FirstTokenTimeout { .. } => "local_model_recovery",
         }
     }
 
@@ -205,7 +229,10 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => false,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::LocalModelUnloaded { .. }
+            | Self::EmptyAssistantStream { .. }
+            | Self::FirstTokenTimeout { .. } => false,
         }
     }
 
@@ -235,7 +262,10 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => false,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::LocalModelUnloaded { .. }
+            | Self::EmptyAssistantStream { .. }
+            | Self::FirstTokenTimeout { .. } => false,
         }
     }
 }
@@ -344,6 +374,30 @@ impl Display for ApiError {
             } => write!(
                 f,
                 "request body size ({estimated_bytes} bytes) exceeds {provider} limit ({max_bytes} bytes); reduce prompt length or context before retrying"
+            ),
+            Self::LocalModelUnloaded {
+                provider,
+                model,
+                attempt,
+            } => write!(
+                f,
+                "local model {model} ({provider}) was unloaded; Claw will warm it up and retry (attempt {attempt})"
+            ),
+            Self::EmptyAssistantStream {
+                provider,
+                model,
+                attempt,
+            } => write!(
+                f,
+                "streaming produced no output for {model} ({provider}); Claw will retry with non-streaming (attempt {attempt})"
+            ),
+            Self::FirstTokenTimeout {
+                provider,
+                model,
+                timeout_ms,
+            } => write!(
+                f,
+                "first token timeout for {model} ({provider}) after {timeout_ms}ms; Claw will retry with extended timeout"
             ),
         }
     }

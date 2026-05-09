@@ -624,6 +624,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut base_commit: Option<String> = None;
     let mut reasoning_effort: Option<String> = None;
     let mut allow_broad_cwd = false;
+    let mut resilience: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut index = 0;
 
@@ -688,6 +689,29 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             flag if flag.starts_with("--permission-mode=") => {
                 permission_mode_override = Some(parse_permission_mode_arg(&flag[18..])?);
+                index += 1;
+            }
+            "--resilience" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --resilience".to_string())?;
+                let lower = value.to_lowercase();
+                if !matches!(lower.as_str(), "force" | "none" | "auto") {
+                    return Err(format!(
+                        "invalid value for --resilience: '{value}'; must be force, none, or auto"
+                    ));
+                }
+                resilience = Some(lower);
+                index += 2;
+            }
+            flag if flag.starts_with("--resilience=") => {
+                let value = &flag[13..].to_lowercase();
+                if !matches!(value.as_str(), "force" | "none" | "auto") {
+                    return Err(format!(
+                        "invalid value for --resilience: '{flag}'; must be force, none, or auto"
+                    ));
+                }
+                resilience = Some(value.to_string());
                 index += 1;
             }
             "--dangerously-skip-permissions" => {
@@ -803,6 +827,15 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
 
     if wants_version {
         return Ok(CliAction::Version { output_format });
+    }
+
+    // Set CLAW_RESILIENCE environment variable if specified via CLI flag
+    if let Some(resilience_setting) = &resilience {
+        if resilience_setting != "auto" {
+            env::set_var("CLAW_RESILIENCE", resilience_setting);
+        } else {
+            env::remove_var("CLAW_RESILIENCE");
+        }
     }
 
     let allowed_tools = normalize_allowed_tools(&allowed_tool_values)?;

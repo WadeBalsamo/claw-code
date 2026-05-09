@@ -42,6 +42,7 @@ pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDA
 pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
+const MAX_GIT_DIFF_CHARS: usize = 50_000;
 
 /// Contents of an instruction file included in prompt construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,7 +316,16 @@ fn render_project_context(project_context: &ProjectContext) -> String {
     if let Some(diff) = &project_context.git_diff {
         lines.push(String::new());
         lines.push("Git diff snapshot:".to_string());
-        lines.push(diff.clone());
+        if diff.len() > MAX_GIT_DIFF_CHARS {
+            lines.push(format!(
+                "{}...\n(Git diff truncated from {} to {} chars for context window efficiency)",
+                &diff[..MAX_GIT_DIFF_CHARS],
+                diff.len(),
+                MAX_GIT_DIFF_CHARS
+            ));
+        } else {
+            lines.push(diff.clone());
+        }
     }
     if let Some(git_context) = &project_context.git_context {
         let rendered = git_context.render();

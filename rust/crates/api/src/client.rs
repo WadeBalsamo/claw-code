@@ -3,6 +3,7 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AuthSource};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
 use crate::providers::{self, ProviderKind};
+use crate::resilience_config::ResilienceConfig;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
 #[allow(clippy::large_enum_variant)]
@@ -23,14 +24,21 @@ impl ProviderClient {
         anthropic_auth: Option<AuthSource>,
     ) -> Result<Self, ApiError> {
         let resolved_model = providers::resolve_model_alias(model);
+        let resilience_config = ResilienceConfig::from_env();
         match providers::detect_provider_kind(&resolved_model) {
-            ProviderKind::Anthropic => Ok(Self::Anthropic(match anthropic_auth {
-                Some(auth) => AnthropicClient::from_auth(auth),
-                None => AnthropicClient::from_env()?,
-            })),
-            ProviderKind::Xai => Ok(Self::Xai(OpenAiCompatClient::from_env(
-                OpenAiCompatConfig::xai(),
-            )?)),
+            ProviderKind::Anthropic => {
+                let client = match anthropic_auth {
+                    Some(auth) => AnthropicClient::from_auth(auth),
+                    None => AnthropicClient::from_env()?,
+                };
+                Ok(Self::Anthropic(
+                    client.with_resilience_config(resilience_config),
+                ))
+            }
+            ProviderKind::Xai => {
+                let client = OpenAiCompatClient::from_env(OpenAiCompatConfig::xai())?;
+                Ok(Self::Xai(client.with_resilience_config(resilience_config)))
+            }
             ProviderKind::OpenAi => {
                 // DashScope models (qwen-*) also return ProviderKind::OpenAi because they
                 // speak the OpenAI wire format, but they need the DashScope config which
@@ -44,7 +52,10 @@ impl ProviderClient {
                     }
                     _ => OpenAiCompatConfig::openai(),
                 };
-                Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))
+                let client = OpenAiCompatClient::from_env(config)?;
+                Ok(Self::OpenAi(
+                    client.with_resilience_config(resilience_config),
+                ))
             }
         }
     }
