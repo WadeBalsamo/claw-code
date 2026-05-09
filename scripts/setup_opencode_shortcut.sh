@@ -688,6 +688,8 @@ printf '   base  : %s\n' "$OPENAI_BASE_URL"
 echo '══════════════════════════════════════════════════════════════════'
 echo
 
+# Disable resilience for cloud providers (OpenRouter uses cloud APIs)
+export CLAW_RESILIENCE=none
 exec "$CLI_BIN" --model "$MODEL" --permission-mode workspace-write
 LAUNCHER_EOF
 

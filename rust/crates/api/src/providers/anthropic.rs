@@ -15,6 +15,7 @@ use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, Session
 use crate::error::ApiError;
 use crate::http_client::build_http_client_or_default;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
+use crate::resilience_config::ResilienceConfig;
 
 use super::{
     anthropic_missing_credentials, model_token_limit, resolve_model_alias, Provider, ProviderFuture,
@@ -122,6 +123,7 @@ pub struct AnthropicClient {
     session_tracer: Option<SessionTracer>,
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
+    resilience_config: ResilienceConfig,
 }
 
 impl AnthropicClient {
@@ -138,6 +140,7 @@ impl AnthropicClient {
             session_tracer: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
+            resilience_config: ResilienceConfig::default(),
         }
     }
 
@@ -154,6 +157,7 @@ impl AnthropicClient {
             session_tracer: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
+            resilience_config: ResilienceConfig::default(),
         }
     }
 
@@ -238,6 +242,12 @@ impl AnthropicClient {
     #[must_use]
     pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
         self.prompt_cache = Some(prompt_cache);
+        self
+    }
+
+    #[must_use]
+    pub fn with_resilience_config(mut self, resilience_config: ResilienceConfig) -> Self {
+        self.resilience_config = resilience_config;
         self
     }
 

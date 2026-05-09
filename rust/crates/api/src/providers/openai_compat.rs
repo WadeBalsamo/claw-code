@@ -7,6 +7,11 @@ use serde_json::{json, Value};
 
 use crate::error::ApiError;
 use crate::http_client::build_http_client_or_default;
+use crate::local_model_recovery::{
+    ErrorClassifier, HealthProfileCache, ProviderCapabilities, RecoveryContext,
+    RecoveryStateMachine, RetryableErrorKind,
+};
+use crate::resilience_config::ResilienceConfig;
 use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
@@ -96,7 +101,7 @@ impl OpenAiCompatConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatClient {
     http: reqwest::Client,
     api_key: String,
@@ -105,6 +110,20 @@ pub struct OpenAiCompatClient {
     max_retries: u32,
     initial_backoff: Duration,
     max_backoff: Duration,
+    health_profiles: std::sync::Arc<HealthProfileCache>,
+    recovery_enabled: bool,
+    resilience_config: ResilienceConfig,
+}
+
+impl std::fmt::Debug for OpenAiCompatClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatClient")
+            .field("config", &self.config)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .field("recovery_enabled", &self.recovery_enabled)
+            .finish()
+    }
 }
 
 impl OpenAiCompatClient {
@@ -118,15 +137,29 @@ impl OpenAiCompatClient {
     }
     #[must_use]
     pub fn new(api_key: impl Into<String>, config: OpenAiCompatConfig) -> Self {
+        let base_url = read_base_url(config);
+        let resilience_config = ResilienceConfig::default();
+        let recovery_enabled = resilience_config.should_enable_for_url(&base_url);
         Self {
             http: build_http_client_or_default(),
             api_key: api_key.into(),
             config,
-            base_url: read_base_url(config),
+            base_url,
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
+            health_profiles: std::sync::Arc::new(HealthProfileCache::new()),
+            recovery_enabled,
+            resilience_config,
         }
+    }
+
+    /// Update the resilience configuration and re-evaluate recovery setting
+    #[must_use]
+    pub fn with_resilience_config(mut self, resilience_config: ResilienceConfig) -> Self {
+        self.resilience_config = resilience_config.clone();
+        self.recovery_enabled = resilience_config.should_enable_for_url(&self.base_url);
+        self
     }
 
     pub fn from_env(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
@@ -158,7 +191,24 @@ impl OpenAiCompatClient {
         self
     }
 
+    #[must_use]
+    pub fn with_recovery_enabled(mut self, enabled: bool) -> Self {
+        self.recovery_enabled = enabled;
+        self
+    }
+
     pub async fn send_message(
+        &self,
+        request: &MessageRequest,
+    ) -> Result<MessageResponse, ApiError> {
+        if !self.recovery_enabled {
+            return self.send_message_without_recovery(request).await;
+        }
+
+        self.send_message_with_recovery(request).await
+    }
+
+    async fn send_message_without_recovery(
         &self,
         request: &MessageRequest,
     ) -> Result<MessageResponse, ApiError> {
@@ -170,11 +220,172 @@ impl OpenAiCompatClient {
         let response = self.send_with_retry(&request).await?;
         let request_id = request_id_from_headers(response.headers());
         let body = response.text().await.map_err(ApiError::from)?;
-        // Some backends return {"error":{"message":"...","type":"...","code":...}}
-        // instead of a valid completion object. Check for this before attempting
-        // full deserialization so the user sees the actual error, not a cryptic
-        // "missing field 'id'" parse failure.
-        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&body) {
+        self.parse_completion_response(&request, &body, request_id)
+    }
+
+    async fn send_message_with_recovery(
+        &self,
+        request: &MessageRequest,
+    ) -> Result<MessageResponse, ApiError> {
+        preflight_message_request(request)?;
+        let capabilities =
+            ProviderCapabilities::for_provider(self.config.provider_name, &request.model);
+        let health_profile = self
+            .health_profiles
+            .get_or_create(&request.model, capabilities.first_token_timeout_ms);
+        let recovery_context = RecoveryContext::new(
+            self.config.provider_name.to_string(),
+            request.model.clone(),
+            health_profile,
+            capabilities,
+        );
+        let mut state_machine = RecoveryStateMachine::new(recovery_context);
+
+        loop {
+            state_machine.next_attempt();
+            let effective_request =
+                state_machine.mutate_request_for_attempt(request, state_machine.context().attempt);
+
+            match self.send_with_retry(&effective_request).await {
+                Ok(response) => {
+                    let request_id = request_id_from_headers(response.headers());
+                    let body = response.text().await.map_err(ApiError::from)?;
+                    match self.parse_completion_response(&effective_request, &body, request_id) {
+                        Ok(response) => {
+                            state_machine.record_success(effective_request.stream);
+                            self.health_profiles.update(
+                                &request.model,
+                                state_machine.context().health_profile.clone(),
+                            );
+                            return Ok(response);
+                        }
+                        Err(err) => {
+                            let error_kind = ErrorClassifier::classify(
+                                &err,
+                                self.config.provider_name,
+                                Some(&body),
+                            );
+                            state_machine.context_mut().last_error_kind = Some(error_kind);
+
+                            match error_kind {
+                                RetryableErrorKind::EmptyStream => {
+                                    state_machine.handle_empty_stream();
+                                    if state_machine.has_more_attempts() {
+                                        tokio::time::sleep(
+                                            state_machine.backoff_for_attempt(
+                                                state_machine.context().attempt,
+                                            ),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+                                RetryableErrorKind::ModelUnloaded => {
+                                    state_machine.handle_model_unloaded();
+                                    if state_machine.has_more_attempts() {
+                                        tokio::time::sleep(
+                                            state_machine.backoff_for_attempt(
+                                                state_machine.context().attempt,
+                                            ),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+                                RetryableErrorKind::FirstTokenStalled => {
+                                    state_machine.handle_first_token_timeout();
+                                    if state_machine.has_more_attempts() {
+                                        tokio::time::sleep(
+                                            state_machine.backoff_for_attempt(
+                                                state_machine.context().attempt,
+                                            ),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+                                RetryableErrorKind::TransportError
+                                | RetryableErrorKind::ServerError => {
+                                    if state_machine.has_more_attempts() {
+                                        tokio::time::sleep(
+                                            state_machine.backoff_for_attempt(
+                                                state_machine.context().attempt,
+                                            ),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+                                RetryableErrorKind::NonRetryable => {
+                                    self.health_profiles.update(
+                                        &request.model,
+                                        state_machine.context().health_profile.clone(),
+                                    );
+                                    return Err(err);
+                                }
+                            }
+                            self.health_profiles.update(
+                                &request.model,
+                                state_machine.context().health_profile.clone(),
+                            );
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let error_kind =
+                        ErrorClassifier::classify(&err, self.config.provider_name, None);
+                    state_machine.context_mut().last_error_kind = Some(error_kind);
+
+                    match error_kind {
+                        RetryableErrorKind::ModelUnloaded => {
+                            state_machine.handle_model_unloaded();
+                            if state_machine.has_more_attempts() {
+                                tokio::time::sleep(
+                                    state_machine
+                                        .backoff_for_attempt(state_machine.context().attempt),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                        RetryableErrorKind::TransportError | RetryableErrorKind::ServerError => {
+                            if state_machine.has_more_attempts() {
+                                tokio::time::sleep(
+                                    state_machine
+                                        .backoff_for_attempt(state_machine.context().attempt),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                        _ => {
+                            self.health_profiles.update(
+                                &request.model,
+                                state_machine.context().health_profile.clone(),
+                            );
+                            return Err(err);
+                        }
+                    }
+
+                    self.health_profiles.update(
+                        &request.model,
+                        state_machine.context().health_profile.clone(),
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    fn parse_completion_response(
+        &self,
+        request: &MessageRequest,
+        body: &str,
+        request_id: Option<String>,
+    ) -> Result<MessageResponse, ApiError> {
+        // Check for error response first
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(body) {
             if let Some(err_obj) = raw.get("error") {
                 let msg = err_obj
                     .get("message")
@@ -194,7 +405,7 @@ impl OpenAiCompatClient {
                         .map(str::to_owned),
                     message: Some(msg),
                     request_id,
-                    body,
+                    body: body.to_string(),
                     retryable: false,
                     suggested_action: suggested_action_for_status(
                         reqwest::StatusCode::from_u16(code.unwrap_or(400))
@@ -203,8 +414,9 @@ impl OpenAiCompatClient {
                 });
             }
         }
-        let payload = serde_json::from_str::<ChatCompletionResponse>(&body).map_err(|error| {
-            ApiError::json_deserialize(self.config.provider_name, &request.model, &body, error)
+
+        let payload = serde_json::from_str::<ChatCompletionResponse>(body).map_err(|error| {
+            ApiError::json_deserialize(self.config.provider_name, &request.model, body, error)
         })?;
         let mut normalized = normalize_response(&request.model, payload)?;
         if normalized.request_id.is_none() {

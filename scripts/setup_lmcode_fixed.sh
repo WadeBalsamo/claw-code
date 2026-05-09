@@ -49,7 +49,8 @@ except Exception as e:
     sys.exit(1)
 
 models = [item.get('id') for item in data.get('data', []) if isinstance(item, dict) and 'id' in item]
-print('\n'.join(models))
+print('
+'.join(models))
 PY
 }
 
@@ -128,7 +129,8 @@ interactive_select() {
     if [ ${#options[@]} -gt 0 ]; then
       echo "Recent addresses:"
       for idx in "${!options[@]}"; do
-        printf "  %3d) %s\n" "$((idx+1))" "${options[$idx]}"
+        printf "  %3d) %s
+" "$((idx+1))" "${options[$idx]}"
       done
       echo "  n) Enter a new address"
       echo "  q) Quit"
@@ -297,18 +299,14 @@ else
 fi
 
 export ANTHROPIC_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}"
-# Also set OPENAI_BASE_URL so the client routes to OpenAI-compatible provider
-# which has resilience features (auto-recovery from model unloads, empty streams, etc.)
-export OPENAI_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}/v1"
-# Use a placeholder API key for local models (LM Studio doesn't require real auth)
-export OPENAI_API_KEY="${OPENAI_API_KEY:-local-model}"
 
 # ----------------------------------------------------------------------
 # obtain models list
 # ----------------------------------------------------------------------
 MODEL_LIST_JSON=""
 if MODEL_LIST_JSON=$(fetch_models "$ANTHROPIC_BASE_URL"); then
-  IFS=$'\n' read -r -d '' -a MODELS < <(printf '%s\0' "$MODEL_LIST_JSON")
+  IFS=$'
+' read -r -d '' -a MODELS < <(printf '%s\0' "$MODEL_LIST_JSON")
   if [ ${#MODELS[@]} -eq 0 ]; then
     echo "Error: no models returned by LM Studio at ${ANTHROPIC_BASE_URL}/v1/models" >&2
     exit 1
@@ -321,7 +319,8 @@ if MODEL_LIST_JSON=$(fetch_models "$ANTHROPIC_BASE_URL"); then
     else
       echo "Available LM Studio models:"
       for idx in "${!MODELS[@]}"; do
-        printf '  %3d) %s\n' "$((idx+1))" "${MODELS[$idx]}"
+        printf '  %3d) %s
+' "$((idx+1))" "${MODELS[$idx]}"
       done
       while true; do
         read -rp "Choose a model number (1-${#MODELS[@]}): " choice
@@ -344,8 +343,6 @@ if [ -z "$MODEL_ARG" ]; then
 fi
 
 echo "Launching claw in $(pwd) with model $MODEL_ARG and full write permissions..."
-# Force enable resilience for local LM Studio
-export CLAW_RESILIENCE=force
 exec "$CLI_BIN" --model "$MODEL_ARG" --permission-mode danger-full-access
 EOF
 

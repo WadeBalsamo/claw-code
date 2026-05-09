@@ -297,11 +297,6 @@ else
 fi
 
 export ANTHROPIC_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}"
-# Also set OPENAI_BASE_URL so the client routes to OpenAI-compatible provider
-# which has resilience features (auto-recovery from model unloads, empty streams, etc.)
-export OPENAI_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}/v1"
-# Use a placeholder API key for local models (LM Studio doesn't require real auth)
-export OPENAI_API_KEY="${OPENAI_API_KEY:-local-model}"
 
 # ----------------------------------------------------------------------
 # obtain models list
@@ -344,8 +339,6 @@ if [ -z "$MODEL_ARG" ]; then
 fi
 
 echo "Launching claw in $(pwd) with model $MODEL_ARG and full write permissions..."
-# Force enable resilience for local LM Studio
-export CLAW_RESILIENCE=force
 exec "$CLI_BIN" --model "$MODEL_ARG" --permission-mode danger-full-access
 EOF
 
