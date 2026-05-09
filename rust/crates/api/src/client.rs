@@ -36,7 +36,10 @@ impl ProviderClient {
                 // speak the OpenAI wire format, but they need the DashScope config which
                 // reads DASHSCOPE_API_KEY and points at dashscope.aliyuncs.com.
                 let config = match providers::metadata_for_model(&resolved_model) {
-                    Some(meta) if meta.auth_env == "DASHSCOPE_API_KEY" => {
+                    Some(meta)
+                        if meta.auth_env == "DASHSCOPE_API_KEY"
+                            && std::env::var_os("OPENAI_BASE_URL").is_none() =>
+                    {
                         OpenAiCompatConfig::dashscope()
                     }
                     _ => OpenAiCompatConfig::openai(),

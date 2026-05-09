@@ -1478,6 +1478,10 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
             trimmed
         ));
     }
+    // Local/custom endpoint: accept any model identifier the server returns
+    if std::env::var_os("OPENAI_BASE_URL").is_some() {
+        return Ok(());
+    }
     // Check provider/model format: provider_id/model_id
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
