@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# clawcode
+# Combined command for running claw-code with LM Studio integration
+# Features:
+# - Adaptable host/port configuration with user prompts
+# - RAM/VRAM detection for model compatibility
+# - Model loading status checking
+
+set -euo pipefail
+
+REPO_ROOT="${CLAW_CODE_ROOT:-$HOME/claw-code}"
+CLI_BIN="$REPO_ROOT/rust/target/debug/claw"
+LM_STUDIO_HOST="${LM_STUDIO_HOST:-10.0.0.58}"
+LM_STUDIO_PORT="${LM_STUDIO_PORT:-1234}"
+
+export ANTHROPIC_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-local-model}"
+
+# Function to check if LM Studio is accessible
+check_lm_studio_connection() {
+    local host="$1"
+    local port="$2"
+    if curl -s -f "http://${host}:${port}/v1/models" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to get system memory information
+get_system_memory() {
+    if command -v free >/dev/null 2>&1; then
+        # Get available RAM in GB
+        local ram_kb=$(free -k | awk '/^Mem:/ {print $7}')  # Available memory
+        echo "ram_gb=$((ram_kb / 1024 / 1024))"
+    else
+        echo "ram_gb=0"
+    fi
+}
+
+# Function to get GPU memory information
+get_gpu_memory() {
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        # Get total and used VRAM in GB
+        local vram_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+        if [ -n "$vram_info" ]; then
+            local total_vram=$(echo "$vram_info" | cut -d',' -f1 | xargs)
+            local used_vram=$(echo "$vram_info" | cut -d',' -f2 | xargs)
+            local free_vram=$((total_vram - used_vram))
+            echo "vram_total_gb=$(( (total_vram + 512) / 1024 ))"  # Round up to nearest GB
+            echo "vram_free_gb=$(( (free_vram + 512) / 1024 ))"    # Round up to nearest GB
+        else
+            echo "vram_total_gb=0"
+            echo "vram_free_gb=0"
+        fi
+    else
+        echo "vram_total_gb=0"
+        echo "vram_free_gb=0"
+    fi
+}
+
+# Function to get model list from LM Studio
+get_lm_studio_models() {
+    local base_url="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$base_url" <<'PY'
+import sys, json, urllib.request, urllib.error
+try:
+    url = sys.argv[1].rstrip('/') + '/v1/models'
+    req = urllib.request.Request(url, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.load(resp)
+    models = []
+    for item in data.get('data', []):
+        if isinstance(item, dict) and 'id' in item:
+            model_info = {
+                'id': item['id'],
+                'size': item.get('size', 0),
+                'owned_by': item.get('owned_by', 'unknown')
+            }
+            models.append(model_info)
+    print(json.dumps(models))
+except Exception as e:
+    print("[]")
+PY
+    else
+        echo "[]"
+    fi
+}
+
+# Function to check if a model can fit in available memory
+can_model_fit() {
+    local model_size=$1  # Size in bytes
+    local ram_gb=$2      # Available RAM in GB
+    local vram_free_gb=$3 # Free VRAM in GB
+    
+    # Convert model size to GB (with some overhead)
+    local model_size_gb=$(( (model_size + 512*1024*1024) / (1024*1024*1024) ))
+    
+    # Simple heuristic: if we have VRAM, try to use it, otherwise use RAM
+    # Models typically need at least their size in memory plus some overhead
+    local required_memory_gb=$((model_size_gb + 2))  # Add 2GB overhead
+    
+    if [ "$vram_free_gb" -gt 0 ] && [ "$vram_free_gb" -ge "$required_memory_gb" ]; then
+        echo "VRAM"
+    elif [ "$ram_gb" -ge "$required_memory_gb" ]; then
+        echo "RAM"
+    else
+        echo "NONE"
+    fi
+}
+
+# Function to prompt user for host/port if connection fails
+prompt_for_host_port() {
+    echo ""
+    echo "Current LM Studio configuration:"
+    echo "  Host: $LM_STUDIO_HOST"
+    echo "  Port: $LM_STUDIO_PORT"
+    echo ""
+    read -rp "Do you want to change the LM Studio host or port? (y/N): " change_config
+    if [[ "$change_config" =~ ^[Yy]$ ]]; then
+        read -rp "Enter new host (current: $LM_STUDIO_HOST): " new_host
+        read -rp "Enter new port (current: $LM_STUDIO_PORT): " new_port
+        
+        LM_STUDIO_HOST="${new_host:-$LM_STUDIO_HOST}"
+        LM_STUDIO_PORT="${new_port:-$LM_STUDIO_PORT}"
+        
+        export ANTHROPIC_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}"
+        echo "Updated configuration: $ANTHROPIC_BASE_URL"
+    fi
+}
+
+# Check if claw binary exists
+if [ ! -x "$CLI_BIN" ]; then
+    echo "Error: claw binary not found at $CLI_BIN" >&2
+    echo "Build it first with: cd $REPO_ROOT/rust && cargo build --workspace" >&2
+    exit 1
+fi
+
+# Check if required tools are available
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is required to parse LM Studio model list." >&2
+    exit 1
+fi
+
+# Parse command line arguments
+MODEL_ARG=""
+CUSTOM_HOST=""
+CUSTOM_PORT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model)
+            if [ $# -lt 2 ]; then
+                echo "Error: --model requires a value" >&2
+                exit 1
+            fi
+            MODEL_ARG="$2"
+            shift 2
+            ;;
+        --host)
+            if [ $# -lt 2 ]; then
+                echo "Error: --host requires a value" >&2
+                exit 1
+            fi
+            CUSTOM_HOST="$2"
+            shift 2
+            ;;
+        --port)
+            if [ $# -lt 2 ]; then
+                echo "Error: --port requires a value" >&2
+                exit 1
+            fi
+            CUSTOM_PORT="$2"
+            shift 2
+            ;;
+        --help|-h)
+            cat <<'HELP_EOF'
+Usage: clawcode [--host HOST] [--port PORT] [--model MODEL]
+
+Runs claw-code from the current directory using LM Studio.
+If --model is not given, this command will list available LM Studio models and prompt you to choose one.
+The shell session will use full write permissions.
+
+Examples:
+  clawcode
+  clawcode --model qwen/qwen3-coder-next
+  clawcode --host 10.0.0.58 --port 1234
+HELP_EOF
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown option $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Override host/port if provided via command line
+if [ -n "$CUSTOM_HOST" ]; then
+    LM_STUDIO_HOST="$CUSTOM_HOST"
+fi
+if [ -n "$CUSTOM_PORT" ]; then
+    LM_STUDIO_PORT="$CUSTOM_PORT"
+fi
+
+export ANTHROPIC_BASE_URL="http://${LM_STUDIO_HOST}:${LM_STUDIO_PORT}"
+
+# Check connection to LM Studio
+if ! check_lm_studio_connection "$LM_STUDIO_HOST" "$LM_STUDIO_PORT"; then
+    echo "Warning: Cannot connect to LM Studio at ${LM_STUDIO_HOST}:${LM_STUDIO_PORT}"
+    prompt_for_host_port
+    
+    # Try connecting again with new settings
+    if ! check_lm_studio_connection "$LM_STUDIO_HOST" "$LM_STUDIO_PORT"; then
+        echo "Error: Still cannot connect to LM Studio at ${LM_STUDIO_HOST}:${LM_STUDIO_PORT}" >&2
+        echo "Please ensure LM Studio server is running and accessible." >&2
+        exit 1
+    fi
+fi
+
+# Get system memory information
+eval "$(get_system_memory)"
+eval "$(get_gpu_memory)"
+
+echo ""
+echo "System Resources:"
+echo "  Available RAM: ${ram_gb}GB"
+if [ "$vram_total_gb" -gt 0 ]; then
+    echo "  GPU VRAM: ${vram_free_gb}/${vram_total_gb}GB free"
+else
+    echo "  GPU VRAM: Not available"
+fi
+
+# Get model list from LM Studio
+MODEL_LIST_JSON=$(get_lm_studio_models "$ANTHROPIC_BASE_URL")
+
+if [ -z "$MODEL_ARG" ]; then
+    # Parse models and display with memory requirements
+    MODELS=()
+    MODEL_SIZES=()
+    MODEL_MEMORY_FIT=()
+    
+    if command -v python3 >/dev/null 2>&1; then
+        IFS=$'\n' read -r -d '' -a MODEL_ENTRIES < <(echo "$MODEL_LIST_JSON" | python3 -c "
+import sys, json
+try:
+    models = json.loads(sys.stdin.read())
+    for model in models:
+        print(model.get('id', 'unknown'))
+        print(model.get('size', 0))
+except:
+    pass
+" && printf '\0')
+        
+        # Process model entries in pairs (name, size)
+        for ((i=0; i<${#MODEL_ENTRIES[@]}; i+=2)); do
+            if [ $((i+1)) -lt ${#MODEL_ENTRIES[@]} ]; then
+                model_name="${MODEL_ENTRIES[$i]}"
+                model_size="${MODEL_ENTRIES[$((i+1))]}"
+                
+                MODELS+=("$model_name")
+                MODEL_SIZES+=("$model_size")
+                
+                # Check if model can fit in available memory
+                fit_location=$(can_model_fit "$model_size" "$ram_gb" "$vram_free_gb")
+                MODEL_MEMORY_FIT+=("$fit_location")
+            fi
+        done
+    fi
+    
+    if [ ${#MODELS[@]} -eq 0 ]; then
+        echo "Error: no models returned by LM Studio at ${ANTHROPIC_BASE_URL}/v1/models" >&2
+        exit 1
+    fi
+
+    if [ ${#MODELS[@]} -eq 1 ]; then
+        MODEL_ARG="${MODELS[0]}"
+        fit_info="${MODEL_MEMORY_FIT[0]:-Unknown}"
+        echo "Using model: $MODEL_ARG (Memory: $fit_info)"
+    else
+        echo ""
+        echo "Available LM Studio models:"
+        for idx in "${!MODELS[@]}"; do
+            model_name="${MODELS[$idx]}"
+            fit_info="${MODEL_MEMORY_FIT[$idx]:-Unknown}"
+            
+            # Add memory fit information to the display
+            case "$fit_info" in
+                "VRAM") 
+                    memory_status="✓ VRAM"
+                    ;;
+                "RAM")
+                    memory_status="~ RAM"
+                    ;;
+                *)
+                    memory_status="✗ Insufficient"
+                    ;;
+            esac
+            
+            printf '  %3d) %-40s [%s]\n' "$((idx+1))" "$model_name" "$memory_status"
+        done
+        
+        echo ""
+        echo "Legend: ✓ Can load in VRAM | ~ Can load in RAM | ✗ May not fit"
+        echo ""
+        
+        while true; do
+            read -rp "Choose a model number (1-${#MODELS[@]}): " choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#MODELS[@]} ]; then
+                MODEL_ARG="${MODELS[$((choice-1))]}"
+                break
+            fi
+            echo "Invalid selection."
+        done
+    fi
+fi
+
+if [ -z "$MODEL_ARG" ]; then
+    echo "Error: model selection failed." >&2
+    exit 1
+fi
+
+echo ""
+echo "Launching claw in $(pwd) with model $MODEL_ARG and workspace-write permissions..."
+exec "$CLI_BIN" --model "$MODEL_ARG" --permission-mode workspace-write
