@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const STARTER_CLAUDE_JSON: &str = concat!(
+const STARTER_CLAW_JSON: &str = concat!(
     "{\n",
     "  \"permissions\": {\n",
     "    \"defaultMode\": \"dontAsk\"\n",
@@ -9,7 +9,7 @@ const STARTER_CLAUDE_JSON: &str = concat!(
     "}\n",
 );
 const GITIGNORE_COMMENT: &str = "# Claw Code local artifacts";
-const GITIGNORE_ENTRIES: [&str; 2] = [".claude/settings.local.json", ".claude/sessions/"];
+const GITIGNORE_ENTRIES: [&str; 3] = [".claw/settings.local.json", ".claw/sessions/", ".clawhip/"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitStatus {
@@ -25,6 +25,18 @@ impl InitStatus {
             Self::Created => "created",
             Self::Updated => "updated",
             Self::Skipped => "skipped (already exists)",
+        }
+    }
+
+    /// Machine-stable identifier for structured output (#142).
+    /// Unlike `label()`, this never changes wording: claws can switch on
+    /// these values without brittle substring matching.
+    #[must_use]
+    pub(crate) fn json_tag(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -58,6 +70,36 @@ impl InitReport {
         lines.push("  Next step        Review and tailor the generated guidance".to_string());
         lines.join("\n")
     }
+
+    /// Summary constant that claws can embed in JSON output without having
+    /// to read it out of the human-formatted `message` string (#142).
+    pub(crate) const NEXT_STEP: &'static str = "Review and tailor the generated guidance";
+
+    /// Artifact names that ended in the given status. Used to build the
+    /// structured `created[]`/`updated[]`/`skipped[]` arrays for #142.
+    #[must_use]
+    pub(crate) fn artifacts_with_status(&self, status: InitStatus) -> Vec<String> {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.status == status)
+            .map(|artifact| artifact.name.to_string())
+            .collect()
+    }
+
+    /// Structured artifact list for JSON output (#142). Each entry carries
+    /// `name` and machine-stable `status` tag.
+    #[must_use]
+    pub(crate) fn artifact_json_entries(&self) -> Vec<serde_json::Value> {
+        self.artifacts
+            .iter()
+            .map(|artifact| {
+                serde_json::json!({
+                    "name": artifact.name,
+                    "status": artifact.status.json_tag(),
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -80,16 +122,16 @@ struct RepoDetection {
 pub(crate) fn initialize_repo(cwd: &Path) -> Result<InitReport, Box<dyn std::error::Error>> {
     let mut artifacts = Vec::new();
 
-    let claude_dir = cwd.join(".claude");
+    let claw_dir = cwd.join(".claw");
     artifacts.push(InitArtifact {
-        name: ".claude/",
-        status: ensure_dir(&claude_dir)?,
+        name: ".claw/",
+        status: ensure_dir(&claw_dir)?,
     });
 
-    let claude_json = cwd.join(".claude.json");
+    let claw_json = cwd.join(".claw.json");
     artifacts.push(InitArtifact {
-        name: ".claude.json",
-        status: write_file_if_missing(&claude_json, STARTER_CLAUDE_JSON)?,
+        name: ".claw.json",
+        status: write_file_if_missing(&claw_json, STARTER_CLAW_JSON)?,
     });
 
     let gitignore = cwd.join(".gitignore");
@@ -209,7 +251,7 @@ pub(crate) fn render_init_claude_md(cwd: &Path) -> String {
 
     lines.push("## Working agreement".to_string());
     lines.push("- Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.".to_string());
-    lines.push("- Keep shared defaults in `.claude.json`; reserve `.claude/settings.local.json` for machine-local overrides.".to_string());
+    lines.push("- Keep shared defaults in `.claw.json`; reserve `.claw/settings.local.json` for machine-local overrides.".to_string());
     lines.push("- Do not overwrite existing `CLAUDE.md` content automatically; update it intentionally when repo workflows change.".to_string());
     lines.push(String::new());
 
@@ -333,7 +375,7 @@ fn framework_notes(detection: &RepoDetection) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{initialize_repo, render_init_claude_md};
+    use super::{initialize_repo, render_init_claude_md, InitStatus};
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -354,15 +396,16 @@ mod tests {
 
         let report = initialize_repo(&root).expect("init should succeed");
         let rendered = report.render();
-        assert!(rendered.contains(".claude/         created"));
-        assert!(rendered.contains(".claude.json     created"));
+        assert!(rendered.contains(".claw/"));
+        assert!(rendered.contains(".claw.json"));
+        assert!(rendered.contains("created"));
         assert!(rendered.contains(".gitignore       created"));
         assert!(rendered.contains("CLAUDE.md        created"));
-        assert!(root.join(".claude").is_dir());
-        assert!(root.join(".claude.json").is_file());
+        assert!(root.join(".claw").is_dir());
+        assert!(root.join(".claw.json").is_file());
         assert!(root.join("CLAUDE.md").is_file());
         assert_eq!(
-            fs::read_to_string(root.join(".claude.json")).expect("read claude json"),
+            fs::read_to_string(root.join(".claw.json")).expect("read claw json"),
             concat!(
                 "{\n",
                 "  \"permissions\": {\n",
@@ -372,8 +415,9 @@ mod tests {
             )
         );
         let gitignore = fs::read_to_string(root.join(".gitignore")).expect("read gitignore");
-        assert!(gitignore.contains(".claude/settings.local.json"));
-        assert!(gitignore.contains(".claude/sessions/"));
+        assert!(gitignore.contains(".claw/settings.local.json"));
+        assert!(gitignore.contains(".claw/sessions/"));
+        assert!(gitignore.contains(".clawhip/"));
         let claude_md = fs::read_to_string(root.join("CLAUDE.md")).expect("read claude md");
         assert!(claude_md.contains("Languages: Rust."));
         assert!(claude_md.contains("cargo clippy --workspace --all-targets -- -D warnings"));
@@ -386,8 +430,7 @@ mod tests {
         let root = temp_dir();
         fs::create_dir_all(&root).expect("create root");
         fs::write(root.join("CLAUDE.md"), "custom guidance\n").expect("write existing claude md");
-        fs::write(root.join(".gitignore"), ".claude/settings.local.json\n")
-            .expect("write gitignore");
+        fs::write(root.join(".gitignore"), ".claw/settings.local.json\n").expect("write gitignore");
 
         let first = initialize_repo(&root).expect("first init should succeed");
         assert!(first
@@ -395,8 +438,9 @@ mod tests {
             .contains("CLAUDE.md        skipped (already exists)"));
         let second = initialize_repo(&root).expect("second init should succeed");
         let second_rendered = second.render();
-        assert!(second_rendered.contains(".claude/         skipped (already exists)"));
-        assert!(second_rendered.contains(".claude.json     skipped (already exists)"));
+        assert!(second_rendered.contains(".claw/"));
+        assert!(second_rendered.contains(".claw.json"));
+        assert!(second_rendered.contains("skipped (already exists)"));
         assert!(second_rendered.contains(".gitignore       skipped (already exists)"));
         assert!(second_rendered.contains("CLAUDE.md        skipped (already exists)"));
         assert_eq!(
@@ -404,8 +448,66 @@ mod tests {
             "custom guidance\n"
         );
         let gitignore = fs::read_to_string(root.join(".gitignore")).expect("read gitignore");
-        assert_eq!(gitignore.matches(".claude/settings.local.json").count(), 1);
-        assert_eq!(gitignore.matches(".claude/sessions/").count(), 1);
+        assert_eq!(gitignore.matches(".claw/settings.local.json").count(), 1);
+        assert_eq!(gitignore.matches(".claw/sessions/").count(), 1);
+        assert_eq!(gitignore.matches(".clawhip/").count(), 1);
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn artifacts_with_status_partitions_fresh_and_idempotent_runs() {
+        // #142: the structured JSON output needs to be able to partition
+        // artifacts into created/updated/skipped without substring matching
+        // the human-formatted `message` string.
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("create root");
+
+        let fresh = initialize_repo(&root).expect("fresh init should succeed");
+        let created_names = fresh.artifacts_with_status(InitStatus::Created);
+        assert_eq!(
+            created_names,
+            vec![
+                ".claw/".to_string(),
+                ".claw.json".to_string(),
+                ".gitignore".to_string(),
+                "CLAUDE.md".to_string(),
+            ],
+            "fresh init should place all four artifacts in created[]"
+        );
+        assert!(
+            fresh.artifacts_with_status(InitStatus::Skipped).is_empty(),
+            "fresh init should have no skipped artifacts"
+        );
+
+        let second = initialize_repo(&root).expect("second init should succeed");
+        let skipped_names = second.artifacts_with_status(InitStatus::Skipped);
+        assert_eq!(
+            skipped_names,
+            vec![
+                ".claw/".to_string(),
+                ".claw.json".to_string(),
+                ".gitignore".to_string(),
+                "CLAUDE.md".to_string(),
+            ],
+            "idempotent init should place all four artifacts in skipped[]"
+        );
+        assert!(
+            second.artifacts_with_status(InitStatus::Created).is_empty(),
+            "idempotent init should have no created artifacts"
+        );
+
+        // artifact_json_entries() uses the machine-stable `json_tag()` which
+        // never changes wording (unlike `label()` which says "skipped (already exists)").
+        let entries = second.artifact_json_entries();
+        assert_eq!(entries.len(), 4);
+        for entry in &entries {
+            let status = entry.get("status").and_then(|v| v.as_str()).unwrap();
+            assert_eq!(
+                status, "skipped",
+                "machine status tag should be the bare word 'skipped', not label()'s 'skipped (already exists)'"
+            );
+        }
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

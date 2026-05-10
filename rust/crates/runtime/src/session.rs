@@ -13,6 +13,7 @@ const SESSION_VERSION: u32 = 1;
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
 const MAX_ROTATED_FILES: usize = 3;
 static SESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Speaker role associated with a persisted conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,12 +66,26 @@ pub struct SessionFork {
     pub branch_name: Option<String>,
 }
 
+/// A single user prompt recorded with a timestamp for history tracking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPromptEntry {
+    pub timestamp_ms: u64,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionPersistence {
     path: PathBuf,
 }
 
 /// Persisted conversational state for the runtime and CLI session manager.
+///
+/// `workspace_root` binds the session to the worktree it was created in. The
+/// global session store under `~/.local/share/opencode` is shared across every
+/// `opencode serve` instance, so without an explicit workspace root parallel
+/// lanes can race and report success while writes land in the wrong CWD. See
+/// ROADMAP.md item 41 (Phantom completions root cause) for the full
+/// background.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub version: u32,
@@ -80,6 +95,13 @@ pub struct Session {
     pub messages: Vec<ConversationMessage>,
     pub compaction: Option<SessionCompaction>,
     pub fork: Option<SessionFork>,
+    pub workspace_root: Option<PathBuf>,
+    pub prompt_history: Vec<SessionPromptEntry>,
+    /// The model used in this session, persisted so resumed sessions can
+    /// report which model was originally used.
+    /// Timestamp of last successful health check (ROADMAP #38)
+    pub last_health_check_ms: Option<u64>,
+    pub model: Option<String>,
     persistence: Option<SessionPersistence>,
 }
 
@@ -92,6 +114,9 @@ impl PartialEq for Session {
             && self.messages == other.messages
             && self.compaction == other.compaction
             && self.fork == other.fork
+            && self.workspace_root == other.workspace_root
+            && self.prompt_history == other.prompt_history
+            && self.last_health_check_ms == other.last_health_check_ms
     }
 }
 
@@ -141,6 +166,10 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             fork: None,
+            workspace_root: None,
+            prompt_history: Vec::new(),
+            last_health_check_ms: None,
+            model: None,
             persistence: None,
         }
     }
@@ -149,6 +178,22 @@ impl Session {
     pub fn with_persistence_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.persistence = Some(SessionPersistence { path: path.into() });
         self
+    }
+
+    /// Bind this session to the workspace root it was created in.
+    ///
+    /// This is the per-worktree counterpart to the global session store and
+    /// lets downstream tooling reject writes that drift to the wrong CWD when
+    /// multiple `opencode serve` instances share `~/.local/share/opencode`.
+    #[must_use]
+    pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(workspace_root.into());
+        self
+    }
+
+    #[must_use]
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
     }
 
     #[must_use]
@@ -225,6 +270,10 @@ impl Session {
                 parent_session_id: self.session_id.clone(),
                 branch_name: normalize_optional_string(branch_name),
             }),
+            workspace_root: self.workspace_root.clone(),
+            prompt_history: self.prompt_history.clone(),
+            last_health_check_ms: self.last_health_check_ms,
+            model: self.model.clone(),
             persistence: None,
         }
     }
@@ -261,6 +310,23 @@ impl Session {
         }
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
+        }
+        if let Some(workspace_root) = &self.workspace_root {
+            object.insert(
+                "workspace_root".to_string(),
+                JsonValue::String(workspace_root_to_string(workspace_root)?),
+            );
+        }
+        if !self.prompt_history.is_empty() {
+            object.insert(
+                "prompt_history".to_string(),
+                JsonValue::Array(
+                    self.prompt_history
+                        .iter()
+                        .map(SessionPromptEntry::to_jsonl_record)
+                        .collect(),
+                ),
+            );
         }
         Ok(JsonValue::Object(object))
     }
@@ -302,6 +368,24 @@ impl Session {
             .map(SessionCompaction::from_json)
             .transpose()?;
         let fork = object.get("fork").map(SessionFork::from_json).transpose()?;
+        let workspace_root = object
+            .get("workspace_root")
+            .and_then(JsonValue::as_str)
+            .map(PathBuf::from);
+        let prompt_history = object
+            .get("prompt_history")
+            .and_then(JsonValue::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(SessionPromptEntry::from_json_opt)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let model = object
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .map(String::from);
         Ok(Self {
             version,
             session_id,
@@ -310,6 +394,10 @@ impl Session {
             messages,
             compaction,
             fork,
+            workspace_root,
+            prompt_history,
+            last_health_check_ms: None,
+            model,
             persistence: None,
         })
     }
@@ -322,6 +410,9 @@ impl Session {
         let mut messages = Vec::new();
         let mut compaction = None;
         let mut fork = None;
+        let mut workspace_root = None;
+        let mut model = None;
+        let mut prompt_history = Vec::new();
 
         for (line_number, raw_line) in contents.lines().enumerate() {
             let line = raw_line.trim();
@@ -356,6 +447,14 @@ impl Session {
                     created_at_ms = Some(required_u64(object, "created_at_ms")?);
                     updated_at_ms = Some(required_u64(object, "updated_at_ms")?);
                     fork = object.get("fork").map(SessionFork::from_json).transpose()?;
+                    workspace_root = object
+                        .get("workspace_root")
+                        .and_then(JsonValue::as_str)
+                        .map(PathBuf::from);
+                    model = object
+                        .get("model")
+                        .and_then(JsonValue::as_str)
+                        .map(String::from);
                 }
                 "message" => {
                     let message_value = object.get("message").ok_or_else(|| {
@@ -370,6 +469,13 @@ impl Session {
                     compaction = Some(SessionCompaction::from_json(&JsonValue::Object(
                         object.clone(),
                     ))?);
+                }
+                "prompt_history" => {
+                    if let Some(entry) =
+                        SessionPromptEntry::from_json_opt(&JsonValue::Object(object.clone()))
+                    {
+                        prompt_history.push(entry);
+                    }
                 }
                 other => {
                     return Err(SessionError::Format(format!(
@@ -389,8 +495,27 @@ impl Session {
             messages,
             compaction,
             fork,
+            workspace_root,
+            prompt_history,
+            last_health_check_ms: None,
+            model,
             persistence: None,
         })
+    }
+
+    /// Record a user prompt with the current wall-clock timestamp.
+    ///
+    /// The entry is appended to the in-memory history and, when a persistence
+    /// path is configured, incrementally written to the JSONL session file.
+    pub fn push_prompt_entry(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
+        let timestamp_ms = current_time_millis();
+        let entry = SessionPromptEntry {
+            timestamp_ms,
+            text: text.into(),
+        };
+        self.prompt_history.push(entry);
+        let entry_ref = self.prompt_history.last().expect("entry was just pushed");
+        self.append_persisted_prompt_entry(entry_ref)
     }
 
     fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
@@ -398,6 +523,11 @@ impl Session {
         if let Some(compaction) = &self.compaction {
             lines.push(compaction.to_jsonl_record()?.render());
         }
+        lines.extend(
+            self.prompt_history
+                .iter()
+                .map(|entry| entry.to_jsonl_record().render()),
+        );
         lines.extend(
             self.messages
                 .iter()
@@ -421,6 +551,25 @@ impl Session {
 
         let mut file = OpenOptions::new().append(true).open(path)?;
         writeln!(file, "{}", message_record(message).render())?;
+        Ok(())
+    }
+
+    fn append_persisted_prompt_entry(
+        &self,
+        entry: &SessionPromptEntry,
+    ) -> Result<(), SessionError> {
+        let Some(path) = self.persistence_path() else {
+            return Ok(());
+        };
+
+        let needs_bootstrap = !path.exists() || fs::metadata(path)?.len() == 0;
+        if needs_bootstrap {
+            self.save_to_path(path)?;
+            return Ok(());
+        }
+
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        writeln!(file, "{}", entry.to_jsonl_record().render())?;
         Ok(())
     }
 
@@ -448,6 +597,15 @@ impl Session {
         );
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
+        }
+        if let Some(workspace_root) = &self.workspace_root {
+            object.insert(
+                "workspace_root".to_string(),
+                JsonValue::String(workspace_root_to_string(workspace_root)?),
+            );
+        }
+        if let Some(model) = &self.model {
+            object.insert("model".to_string(), JsonValue::String(model.clone()));
         }
         Ok(JsonValue::Object(object))
     }
@@ -734,6 +892,33 @@ impl SessionFork {
     }
 }
 
+impl SessionPromptEntry {
+    #[must_use]
+    pub fn to_jsonl_record(&self) -> JsonValue {
+        let mut object = BTreeMap::new();
+        object.insert(
+            "type".to_string(),
+            JsonValue::String("prompt_history".to_string()),
+        );
+        object.insert(
+            "timestamp_ms".to_string(),
+            JsonValue::Number(i64::try_from(self.timestamp_ms).unwrap_or(i64::MAX)),
+        );
+        object.insert("text".to_string(), JsonValue::String(self.text.clone()));
+        JsonValue::Object(object)
+    }
+
+    fn from_json_opt(value: &JsonValue) -> Option<Self> {
+        let object = value.as_object()?;
+        let timestamp_ms = object
+            .get("timestamp_ms")
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| u64::try_from(value).ok())?;
+        let text = object.get("text").and_then(JsonValue::as_str)?.to_string();
+        Some(Self { timestamp_ms, text })
+    }
+}
+
 fn message_record(message: &ConversationMessage) -> JsonValue {
     let mut object = BTreeMap::new();
     object.insert("type".to_string(), JsonValue::String("message".to_string()));
@@ -825,6 +1010,15 @@ fn i64_from_usize(value: usize, key: &str) -> Result<i64, SessionError> {
         .map_err(|_| SessionError::Format(format!("{key} out of range for JSON number")))
 }
 
+fn workspace_root_to_string(path: &Path) -> Result<String, SessionError> {
+    path.to_str().map(ToOwned::to_owned).ok_or_else(|| {
+        SessionError::Format(format!(
+            "workspace_root is not valid UTF-8: {}",
+            path.display()
+        ))
+    })
+}
+
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -837,10 +1031,27 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 }
 
 fn current_time_millis() -> u64 {
-    SystemTime::now()
+    let wall_clock = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let mut candidate = wall_clock;
+    loop {
+        let previous = LAST_TIMESTAMP_MS.load(Ordering::Relaxed);
+        if candidate <= previous {
+            candidate = previous.saturating_add(1);
+        }
+        match LAST_TIMESTAMP_MS.compare_exchange(
+            previous,
+            candidate,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => candidate = actual.saturating_add(1),
+        }
+    }
 }
 
 fn generate_session_id() -> String {
@@ -932,14 +1143,24 @@ fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_rotated_logs, rotate_session_file_if_needed, ContentBlock, ConversationMessage,
-        MessageRole, Session, SessionFork,
+        cleanup_rotated_logs, current_time_millis, rotate_session_file_if_needed, ContentBlock,
+        ConversationMessage, MessageRole, Session, SessionFork,
     };
     use crate::json::JsonValue;
     use crate::usage::TokenUsage;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn session_timestamps_are_monotonic_under_tight_loops() {
+        let first = current_time_millis();
+        let second = current_time_millis();
+        let third = current_time_millis();
+
+        assert!(first < second);
+        assert!(second < third);
+    }
 
     #[test]
     fn persists_and_restores_session_jsonl() {
@@ -1206,6 +1427,29 @@ mod tests {
         assert!(error.to_string().contains("unsupported block type"));
     }
 
+    #[test]
+    fn persists_workspace_root_round_trip_and_forks_inherit_it() {
+        // given
+        let path = temp_session_path("workspace-root");
+        let workspace_root = PathBuf::from("/tmp/b4-phantom-diag");
+        let mut session = Session::new().with_workspace_root(workspace_root.clone());
+        session
+            .push_user_text("write to the right cwd")
+            .expect("user message should append");
+
+        // when
+        session
+            .save_to_path(&path)
+            .expect("workspace-bound session should save");
+        let restored = Session::load_from_path(&path).expect("session should load");
+        let forked = restored.fork(Some("phantom-diag".to_string()));
+        fs::remove_file(&path).expect("temp file should be removable");
+
+        // then
+        assert_eq!(restored.workspace_root(), Some(workspace_root.as_path()));
+        assert_eq!(forked.workspace_root(), Some(workspace_root.as_path()));
+    }
+
     fn temp_session_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1242,5 +1486,60 @@ mod tests {
                     })
             })
             .collect()
+    }
+}
+
+/// Per-worktree session isolation: returns a session directory namespaced
+/// by the workspace fingerprint of the given working directory.
+/// This prevents parallel `opencode serve` instances from colliding.
+/// Called by external consumers (e.g. clawhip) to enumerate sessions for a CWD.
+#[allow(dead_code)]
+pub fn workspace_sessions_dir(cwd: &std::path::Path) -> Result<std::path::PathBuf, SessionError> {
+    let store = crate::session_control::SessionStore::from_cwd(cwd)
+        .map_err(|e| SessionError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(store.sessions_dir().to_path_buf())
+}
+
+#[cfg(test)]
+mod workspace_sessions_dir_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn workspace_sessions_dir_returns_fingerprinted_path_for_valid_cwd() {
+        let tmp = std::env::temp_dir().join("claw-session-dir-test");
+        fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let result = workspace_sessions_dir(&tmp);
+        assert!(
+            result.is_ok(),
+            "workspace_sessions_dir should succeed for a valid CWD, got: {result:?}"
+        );
+        let dir = result.unwrap();
+        // The returned path should be non-empty and end with a hash component
+        assert!(!dir.as_os_str().is_empty());
+        // Two calls with the same CWD should produce identical paths (deterministic)
+        let result2 = workspace_sessions_dir(&tmp).unwrap();
+        assert_eq!(dir, result2, "workspace_sessions_dir must be deterministic");
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn workspace_sessions_dir_differs_for_different_cwds() {
+        let tmp_a = std::env::temp_dir().join("claw-session-dir-a");
+        let tmp_b = std::env::temp_dir().join("claw-session-dir-b");
+        fs::create_dir_all(&tmp_a).expect("create dir a");
+        fs::create_dir_all(&tmp_b).expect("create dir b");
+
+        let dir_a = workspace_sessions_dir(&tmp_a).expect("dir a");
+        let dir_b = workspace_sessions_dir(&tmp_b).expect("dir b");
+        assert_ne!(
+            dir_a, dir_b,
+            "different CWDs must produce different session dirs"
+        );
+
+        fs::remove_dir_all(&tmp_a).ok();
+        fs::remove_dir_all(&tmp_b).ok();
     }
 }

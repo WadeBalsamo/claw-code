@@ -1,7 +1,17 @@
-# Rewriting Project Claw Code
+# Claw Code
 
 <p align="center">
-  <strong>⭐ The fastest repo in history to surpass 50K stars, reaching the milestone in just 2 hours after publication ⭐</strong>
+  <a href="https://github.com/ultraworkers/claw-code">ultraworkers/claw-code</a>
+  ·
+  <a href="./USAGE.md">Usage</a>
+  ·
+  <a href="./rust/README.md">Rust workspace</a>
+  ·
+  <a href="./PARITY.md">Parity</a>
+  ·
+  <a href="./ROADMAP.md">Roadmap</a>
+  ·
+  <a href="https://discord.gg/5TUQKqFWd">UltraWorkers Discord</a>
 </p>
 
 <p align="center">
@@ -9,177 +19,192 @@
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date&theme=dark" />
       <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date" width="600" />
+      <img alt="Star history for ultraworkers/claw-code" src="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date" width="600" />
     </picture>
   </a>
 </p>
 
 <p align="center">
-  <img src="assets/clawd-hero.jpeg" alt="Claw" width="300" />
+  <img src="assets/claw-hero.jpeg" alt="Claw Code" width="300" />
 </p>
 
-<p align="center">
-  <strong>Autonomously maintained by lobsters/claws — not by human hands</strong>
-</p>
-
-<p align="center">
-  <a href="https://github.com/Yeachan-Heo/clawhip">clawhip</a> ·
-  <a href="https://github.com/code-yeongyu/oh-my-openagent">oh-my-openagent</a> ·
-  <a href="https://github.com/Yeachan-Heo/oh-my-claudecode">oh-my-claudecode</a> ·
-  <a href="https://github.com/Yeachan-Heo/oh-my-codex">oh-my-codex</a> ·
-  <a href="https://discord.gg/6ztZB9jvWq">UltraWorkers Discord</a>
-</p>
+Claw Code is the public Rust implementation of the `claw` CLI agent harness.
+The canonical implementation lives in [`rust/`](./rust), and the current source of truth for this repository is **ultraworkers/claw-code**.
 
 > [!IMPORTANT]
-> The active Rust workspace now lives in [`rust/`](./rust). Start with [`USAGE.md`](./USAGE.md) for build, auth, CLI, session, and parity-harness workflows, then use [`rust/README.md`](./rust/README.md) for crate-level details.
+> Start with [`USAGE.md`](./USAGE.md) for build, auth, CLI, session, and parity-harness workflows. Make `claw doctor` your first health check after building, use [`rust/README.md`](./rust/README.md) for crate-level details, read [`PARITY.md`](./PARITY.md) for the current Rust-port checkpoint, and see [`docs/container.md`](./docs/container.md) for the container-first workflow.
+>
+> **ACP / Zed status:** `claw-code` does not ship an ACP/Zed daemon entrypoint yet. Run `claw acp` (or `claw --acp`) for the current status instead of guessing from source layout; `claw acp serve` is currently a discoverability alias only, and real ACP support remains tracked separately in `ROADMAP.md`.
 
-> Want the bigger idea behind this repo? Read [`PHILOSOPHY.md`](./PHILOSOPHY.md) and Sigrid Jin's public explanation: https://x.com/realsigridjin/status/2039472968624185713
+## Current repository shape
 
-> Shout-out to the UltraWorkers ecosystem powering this repo: [clawhip](https://github.com/Yeachan-Heo/clawhip), [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent), [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode), [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex), and the [UltraWorkers Discord](https://discord.gg/6ztZB9jvWq).
+- **`rust/`** — canonical Rust workspace and the `claw` CLI binary
+- **`USAGE.md`** — task-oriented usage guide for the current product surface
+- **`PARITY.md`** — Rust-port parity status and migration notes
+- **`ROADMAP.md`** — active roadmap and cleanup backlog
+- **`PHILOSOPHY.md`** — project intent and system-design framing
+- **`src/` + `tests/`** — companion Python/reference workspace and audit helpers; not the primary runtime surface
 
----
+## Quick start
 
-## Backstory
-
-This repo is maintained by **lobsters/claws**, not by a conventional human-only dev team.
-
-The people behind the system are [Bellman / Yeachan Heo](https://github.com/Yeachan-Heo) and friends like [Yeongyu](https://github.com/code-yeongyu), but the repo itself is being pushed forward by autonomous claw workflows: parallel coding sessions, event-driven orchestration, recovery loops, and machine-readable lane state.
-
-In practice, that means this project is not just *about* coding agents — it is being **actively built by them**. Features, tests, telemetry, docs, and workflow hardening are landed through claw-driven loops using [clawhip](https://github.com/Yeachan-Heo/clawhip), [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent), [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode), and [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex).
-
-This repository exists to prove that an open coding harness can be built **autonomously, in public, and at high velocity** — with humans setting direction and claws doing the grinding.
-
-See the public build story here:
-
-https://x.com/realsigridjin/status/2039472968624185713
-
-![Tweet screenshot](assets/tweet-screenshot.png)
-
----
-
-## Porting Status
-
-The main source tree is now Python-first.
-
-- `src/` contains the active Python porting workspace
-- `tests/` verifies the current Python workspace
-- the exposed snapshot is no longer part of the tracked repository state
-
-The current Python workspace is not yet a complete one-to-one replacement for the original system, but the primary implementation surface is now Python.
-
-## Why this rewrite exists
-
-I originally studied the exposed codebase to understand its harness, tool wiring, and agent workflow. After spending more time with the legal and ethical questions—and after reading the essay linked below—I did not want the exposed snapshot itself to remain the main tracked source tree.
-
-This repository now focuses on Python porting work instead.
-
-## Repository Layout
-
-```text
-.
-├── src/                                # Python porting workspace
-│   ├── __init__.py
-│   ├── commands.py
-│   ├── main.py
-│   ├── models.py
-│   ├── port_manifest.py
-│   ├── query_engine.py
-│   ├── task.py
-│   └── tools.py
-├── tests/                              # Python verification
-├── assets/omx/                         # OmX workflow screenshots
-├── 2026-03-09-is-legal-the-same-as-legitimate-ai-reimplementation-and-the-erosion-of-copyleft.md
-└── README.md
-```
-
-## Python Workspace Overview
-
-The new Python `src/` tree currently provides:
-
-- **`port_manifest.py`** — summarizes the current Python workspace structure
-- **`models.py`** — dataclasses for subsystems, modules, and backlog state
-- **`commands.py`** — Python-side command port metadata
-- **`tools.py`** — Python-side tool port metadata
-- **`query_engine.py`** — renders a Python porting summary from the active workspace
-- **`main.py`** — a CLI entrypoint for manifest and summary output
-
-## Quickstart
-
-Render the Python porting summary:
+> [!NOTE]
+> [!WARNING]
+> **`cargo install claw-code` installs the wrong thing.** The `claw-code` crate on crates.io is a deprecated stub that places `claw-code-deprecated.exe` — not `claw`. Running it only prints `"claw-code has been renamed to agent-code"`. **Do not use `cargo install claw-code`.** Either build from source (this repo) or install the upstream binary:
+> ```bash
+> cargo install agent-code   # upstream binary — installs 'agent.exe' (Windows) / 'agent' (Unix), NOT 'agent-code'
+> ```
+> This repo (`ultraworkers/claw-code`) is **build-from-source only** — follow the steps below.
 
 ```bash
-python3 -m src.main summary
+# 1. Clone and build
+git clone https://github.com/ultraworkers/claw-code
+cd claw-code/rust
+cargo build --workspace
+
+# 2. Set your API key (Anthropic API key — not a Claude subscription)
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# 3. Verify everything is wired correctly
+./target/debug/claw doctor
+
+# 4. Run a prompt
+./target/debug/claw prompt "say hello"
 ```
 
-Print the current Python workspace manifest:
+> [!NOTE]
+> **Windows (PowerShell):** the binary is `claw.exe`, not `claw`. Use `.\target\debug\claw.exe` or run `cargo run -- prompt "say hello"` to skip the path lookup.
+
+### Windows setup
+
+**PowerShell is a supported Windows path.** Use whichever shell works for you. The common onboarding issues on Windows are:
+
+1. **Install Rust first** — download from <https://rustup.rs/> and run the installer. Close and reopen your terminal when it finishes.
+2. **Verify Rust is on PATH:**
+   ```powershell
+   cargo --version
+   ```
+   If this fails, reopen your terminal or run the PATH setup from the Rust installer output, then retry.
+3. **Clone and build** (works in PowerShell, Git Bash, or WSL):
+   ```powershell
+   git clone https://github.com/ultraworkers/claw-code
+   cd claw-code/rust
+   cargo build --workspace
+   ```
+4. **Run** (PowerShell — note `.exe` and backslash):
+   ```powershell
+   $env:ANTHROPIC_API_KEY = "sk-ant-..."
+   .\target\debug\claw.exe prompt "say hello"
+   ```
+
+**Git Bash / WSL** are optional alternatives, not requirements. If you prefer bash-style paths (`/c/Users/you/...` instead of `C:\Users\you\...`), Git Bash (ships with Git for Windows) works well. In Git Bash, the `MINGW64` prompt is expected and normal — not a broken install.
+
+## Post-build: locate the binary and verify
+
+After running `cargo build --workspace`, the `claw` binary is built but **not** automatically installed to your system. Here's where to find it and how to verify the build succeeded.
+
+### Binary location
+
+After `cargo build --workspace` in `claw-code/rust/`:
+
+**Debug build (default, faster compile):**
+- **macOS/Linux:** `rust/target/debug/claw`
+- **Windows:** `rust/target/debug/claw.exe`
+
+**Release build (optimized, slower compile):**
+- **macOS/Linux:** `rust/target/release/claw`
+- **Windows:** `rust/target/release/claw.exe`
+
+If you ran `cargo build` without `--release`, the binary is in the `debug/` folder.
+
+### Verify the build succeeded
+
+Test the binary directly using its path:
 
 ```bash
-python3 -m src.main manifest
+# macOS/Linux (debug build)
+./rust/target/debug/claw --help
+./rust/target/debug/claw doctor
+
+# Windows PowerShell (debug build)
+.\rust\target\debug\claw.exe --help
+.\rust\target\debug\claw.exe doctor
 ```
 
-List the current Python modules:
+If these commands succeed, the build is working. `claw doctor` is your first health check — it validates your API key, model access, and tool configuration.
+
+### Optional: Add to PATH
+
+If you want to run `claw` from any directory without the full path, choose one of these approaches:
+
+**Option 1: Symlink (macOS/Linux)**
+```bash
+ln -s $(pwd)/rust/target/debug/claw /usr/local/bin/claw
+```
+Then reload your shell and test:
+```bash
+claw --help
+```
+
+**Option 2: Use `cargo install` (all platforms)**
+
+Build and install to Cargo's default location (`~/.cargo/bin/`, which is usually on PATH):
+```bash
+# From the claw-code/rust/ directory
+cargo install --path . --force
+
+# Then from anywhere
+claw --help
+```
+
+**Option 3: Update shell profile (bash/zsh)**
+
+Add this line to `~/.bashrc` or `~/.zshrc`:
+```bash
+export PATH="$(pwd)/rust/target/debug:$PATH"
+```
+
+Reload your shell:
+```bash
+source ~/.bashrc  # or source ~/.zshrc
+claw --help
+```
+
+### Troubleshooting
+
+- **"command not found: claw"** — The binary is in `rust/target/debug/claw`, but it's not on your PATH. Use the full path `./rust/target/debug/claw` or symlink/install as above.
+- **"permission denied"** — On macOS/Linux, you may need `chmod +x rust/target/debug/claw` if the executable bit isn't set (rare).
+- **Debug vs. release** — If the build is slow, you're in debug mode (default). Add `--release` to `cargo build` for faster runtime, but the build itself will take 5–10 minutes.
+
+> [!NOTE]
+> **Auth:** claw requires an **API key** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) — Claude subscription login is not a supported auth path.
+
+Run the workspace test suite after verifying the binary works:
 
 ```bash
-python3 -m src.main subsystems --limit 16
+cd rust
+cargo test --workspace
 ```
 
-Run verification:
+## Documentation map
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+- [`USAGE.md`](./USAGE.md) — quick commands, auth, sessions, config, parity harness
+- [`rust/README.md`](./rust/README.md) — crate map, CLI surface, features, workspace layout
+- [`PARITY.md`](./PARITY.md) — parity status for the Rust port
+- [`rust/MOCK_PARITY_HARNESS.md`](./rust/MOCK_PARITY_HARNESS.md) — deterministic mock-service harness details
+- [`ROADMAP.md`](./ROADMAP.md) — active roadmap and open cleanup work
+- [`PHILOSOPHY.md`](./PHILOSOPHY.md) — why the project exists and how it is operated
 
-Run the parity audit against the local ignored archive (when present):
+## Ecosystem
 
-```bash
-python3 -m src.main parity-audit
-```
+Claw Code is built in the open alongside the broader UltraWorkers toolchain:
 
-Inspect mirrored command/tool inventories:
+- [clawhip](https://github.com/Yeachan-Heo/clawhip)
+- [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)
+- [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode)
+- [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex)
+- [UltraWorkers Discord](https://discord.gg/5TUQKqFWd)
 
-```bash
-python3 -m src.main commands --limit 10
-python3 -m src.main tools --limit 10
-```
-
-## Current Parity Checkpoint
-
-The port now mirrors the archived root-entry file surface, top-level subsystem names, and command/tool inventories much more closely than before. However, it is **not yet** a full runtime-equivalent replacement for the original TypeScript system; the Python tree still contains fewer executable runtime slices than the archived source.
-
-
-## Built with `oh-my-codex`
-
-The restructuring and documentation work on this repository was AI-assisted and orchestrated with Yeachan Heo's [oh-my-codex (OmX)](https://github.com/Yeachan-Heo/oh-my-codex), layered on top of Codex.
-
-- **`$team` mode:** used for coordinated parallel review and architectural feedback
-- **`$ralph` mode:** used for persistent execution, verification, and completion discipline
-- **Codex-driven workflow:** used to turn the main `src/` tree into a Python-first porting workspace
-
-### OmX workflow screenshots
-
-![OmX workflow screenshot 1](assets/omx/omx-readme-review-1.png)
-
-*Ralph/team orchestration view while the README and essay context were being reviewed in terminal panes.*
-
-![OmX workflow screenshot 2](assets/omx/omx-readme-review-2.png)
-
-*Split-pane review and verification flow during the final README wording pass.*
-
-## Community
-
-<p align="center">
-  <a href="https://discord.gg/6ztZB9jvWq"><img src="https://img.shields.io/badge/UltraWorkers-Discord-5865F2?logo=discord&style=for-the-badge" alt="UltraWorkers Discord" /></a>
-</p>
-
-Join the [**UltraWorkers Discord**](https://discord.gg/6ztZB9jvWq) — the community around clawhip, oh-my-openagent, oh-my-claudecode, oh-my-codex, and claw-code. Come chat about LLMs, harness engineering, agent workflows, and autonomous software development.
-
-[![Discord](https://img.shields.io/badge/Join%20Discord-UltraWorkers-5865F2?logo=discord&style=for-the-badge)](https://discord.gg/6ztZB9jvWq)
-
-## Star History
-
-See the chart at the top of this README.
-
-## Ownership / Affiliation Disclaimer
+## Ownership / affiliation disclaimer
 
 - This repository does **not** claim ownership of the original Claude Code source material.
 - This repository is **not affiliated with, endorsed by, or maintained by Anthropic**.

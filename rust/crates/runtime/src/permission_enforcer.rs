@@ -1,3 +1,8 @@
+#![allow(
+    clippy::match_wildcard_for_single_variants,
+    clippy::must_use_candidate,
+    clippy::uninlined_format_args
+)]
 //! Permission enforcement layer that gates tool execution based on the
 //! active `PermissionPolicy`.
 
@@ -58,6 +63,40 @@ impl PermissionEnforcer {
     #[must_use]
     pub fn is_allowed(&self, tool_name: &str, input: &str) -> bool {
         matches!(self.check(tool_name, input), EnforcementResult::Allowed)
+    }
+
+    /// Check permission with an explicitly provided required mode.
+    /// Used when the required mode is determined dynamically (e.g., bash command classification).
+    pub fn check_with_required_mode(
+        &self,
+        tool_name: &str,
+        input: &str,
+        required_mode: PermissionMode,
+    ) -> EnforcementResult {
+        // When the active mode is Prompt, defer to the caller's interactive
+        // prompt flow rather than hard-denying.
+        if self.policy.active_mode() == PermissionMode::Prompt {
+            return EnforcementResult::Allowed;
+        }
+
+        let active_mode = self.policy.active_mode();
+
+        // Check if active mode meets the dynamically determined required mode
+        if active_mode >= required_mode {
+            return EnforcementResult::Allowed;
+        }
+
+        // Permission denied - active mode is insufficient
+        EnforcementResult::Denied {
+            tool: tool_name.to_owned(),
+            active_mode: active_mode.as_str().to_owned(),
+            required_mode: required_mode.as_str().to_owned(),
+            reason: format!(
+                "'{tool_name}' with input '{input}' requires '{}' permission, but current mode is '{}'",
+                required_mode.as_str(),
+                active_mode.as_str()
+            ),
+        }
     }
 
     #[must_use]

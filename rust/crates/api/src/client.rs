@@ -3,6 +3,7 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AuthSource};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
 use crate::providers::{self, ProviderKind};
+use crate::resilience_config::ResilienceConfig;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
 #[allow(clippy::large_enum_variant)]
@@ -23,17 +24,39 @@ impl ProviderClient {
         anthropic_auth: Option<AuthSource>,
     ) -> Result<Self, ApiError> {
         let resolved_model = providers::resolve_model_alias(model);
+        let resilience_config = ResilienceConfig::from_env();
         match providers::detect_provider_kind(&resolved_model) {
-            ProviderKind::Anthropic => Ok(Self::Anthropic(match anthropic_auth {
-                Some(auth) => AnthropicClient::from_auth(auth),
-                None => AnthropicClient::from_env()?,
-            })),
-            ProviderKind::Xai => Ok(Self::Xai(OpenAiCompatClient::from_env(
-                OpenAiCompatConfig::xai(),
-            )?)),
-            ProviderKind::OpenAi => Ok(Self::OpenAi(OpenAiCompatClient::from_env(
-                OpenAiCompatConfig::openai(),
-            )?)),
+            ProviderKind::Anthropic => {
+                let client = match anthropic_auth {
+                    Some(auth) => AnthropicClient::from_auth(auth),
+                    None => AnthropicClient::from_env()?,
+                };
+                Ok(Self::Anthropic(
+                    client.with_resilience_config(resilience_config),
+                ))
+            }
+            ProviderKind::Xai => {
+                let client = OpenAiCompatClient::from_env(OpenAiCompatConfig::xai())?;
+                Ok(Self::Xai(client.with_resilience_config(resilience_config)))
+            }
+            ProviderKind::OpenAi => {
+                // DashScope models (qwen-*) also return ProviderKind::OpenAi because they
+                // speak the OpenAI wire format, but they need the DashScope config which
+                // reads DASHSCOPE_API_KEY and points at dashscope.aliyuncs.com.
+                let config = match providers::metadata_for_model(&resolved_model) {
+                    Some(meta)
+                        if meta.auth_env == "DASHSCOPE_API_KEY"
+                            && std::env::var_os("OPENAI_BASE_URL").is_none() =>
+                    {
+                        OpenAiCompatConfig::dashscope()
+                    }
+                    _ => OpenAiCompatConfig::openai(),
+                };
+                let client = OpenAiCompatClient::from_env(config)?;
+                Ok(Self::OpenAi(
+                    client.with_resilience_config(resilience_config),
+                ))
+            }
         }
     }
 
@@ -135,7 +158,20 @@ pub fn read_xai_base_url() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use super::ProviderClient;
     use crate::providers::{detect_provider_kind, resolve_model_alias, ProviderKind};
+
+    /// Serializes every test in this module that mutates process-wide
+    /// environment variables so concurrent test threads cannot observe
+    /// each other's partially-applied state.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn resolves_existing_and_grok_aliases() {
@@ -151,5 +187,66 @@ mod tests {
             detect_provider_kind("claude-sonnet-4-6"),
             ProviderKind::Anthropic
         );
+    }
+
+    /// Snapshot-restore guard for a single environment variable. Mirrors
+    /// the pattern used in `providers/mod.rs` tests: captures the original
+    /// value on construction, applies the override, and restores on drop so
+    /// tests leave the process env untouched even when they panic.
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(key);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn dashscope_model_uses_dashscope_config_not_openai() {
+        // Regression: qwen-plus was being routed to OpenAiCompatConfig::openai()
+        // which reads OPENAI_API_KEY and points at api.openai.com, when it should
+        // use OpenAiCompatConfig::dashscope() which reads DASHSCOPE_API_KEY and
+        // points at dashscope.aliyuncs.com.
+        let _lock = env_lock();
+        let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", Some("test-dashscope-key"));
+        let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
+
+        let client = ProviderClient::from_model("qwen-plus");
+
+        // Must succeed (not fail with "missing OPENAI_API_KEY")
+        assert!(
+            client.is_ok(),
+            "qwen-plus with DASHSCOPE_API_KEY set should build successfully, got: {:?}",
+            client.err()
+        );
+
+        // Verify it's the OpenAi variant pointed at the DashScope base URL.
+        match client.unwrap() {
+            ProviderClient::OpenAi(openai_client) => {
+                assert!(
+                    openai_client.base_url().contains("dashscope.aliyuncs.com"),
+                    "qwen-plus should route to DashScope base URL (contains 'dashscope.aliyuncs.com'), got: {}",
+                    openai_client.base_url()
+                );
+            }
+            other => panic!("Expected ProviderClient::OpenAi for qwen-plus, got: {other:?}"),
+        }
     }
 }

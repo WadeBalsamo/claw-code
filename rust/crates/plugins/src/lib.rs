@@ -1,10 +1,13 @@
 mod hooks;
+#[cfg(test)]
+pub mod test_isolation;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -920,6 +923,9 @@ pub enum PluginManifestValidationError {
         tool_name: String,
         permission: String,
     },
+    UnsupportedManifestContract {
+        detail: String,
+    },
 }
 
 impl Display for PluginManifestValidationError {
@@ -965,6 +971,7 @@ impl Display for PluginManifestValidationError {
                 f,
                 "plugin tool `{tool_name}` requiredPermission `{permission}` must be read-only, workspace-write, or danger-full-access"
             ),
+            Self::UnsupportedManifestContract { detail } => f.write_str(detail),
         }
     }
 }
@@ -1594,8 +1601,71 @@ fn load_manifest_from_path(
             manifest_path.display()
         ))
     })?;
-    let raw_manifest: RawPluginManifest = serde_json::from_str(&contents)?;
+    let raw_json: Value = serde_json::from_str(&contents)?;
+    let compatibility_errors = detect_claude_code_manifest_contract_gaps(&raw_json);
+    if !compatibility_errors.is_empty() {
+        return Err(PluginError::ManifestValidation(compatibility_errors));
+    }
+    let raw_manifest: RawPluginManifest = serde_json::from_value(raw_json)?;
     build_plugin_manifest(root, raw_manifest)
+}
+
+fn detect_claude_code_manifest_contract_gaps(
+    raw_manifest: &Value,
+) -> Vec<PluginManifestValidationError> {
+    let Some(root) = raw_manifest.as_object() else {
+        return Vec::new();
+    };
+
+    let mut errors = Vec::new();
+
+    for (field, detail) in [
+        (
+            "skills",
+            "plugin manifest field `skills` uses the Claude Code plugin contract; `claw` does not load plugin-managed skills and instead discovers skills from local roots such as `.claw/skills`, `.omc/skills`, `.agents/skills`, `~/.omc/skills`, and `~/.claude/skills/omc-learned`.",
+        ),
+        (
+            "mcpServers",
+            "plugin manifest field `mcpServers` uses the Claude Code plugin contract; `claw` does not import MCP servers from plugin manifests.",
+        ),
+        (
+            "agents",
+            "plugin manifest field `agents` uses the Claude Code plugin contract; `claw` does not load plugin-managed agent markdown catalogs from plugin manifests.",
+        ),
+    ] {
+        if root.contains_key(field) {
+            errors.push(PluginManifestValidationError::UnsupportedManifestContract {
+                detail: detail.to_string(),
+            });
+        }
+    }
+
+    if root
+        .get("commands")
+        .and_then(Value::as_array)
+        .is_some_and(|commands| commands.iter().any(Value::is_string))
+    {
+        errors.push(PluginManifestValidationError::UnsupportedManifestContract {
+            detail: "plugin manifest field `commands` uses Claude Code-style directory globs; `claw` slash dispatch is still built-in and does not load plugin slash command markdown files.".to_string(),
+        });
+    }
+
+    if let Some(hooks) = root.get("hooks").and_then(Value::as_object) {
+        for hook_name in hooks.keys() {
+            if !matches!(
+                hook_name.as_str(),
+                "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+            ) {
+                errors.push(PluginManifestValidationError::UnsupportedManifestContract {
+                    detail: format!(
+                        "plugin hook `{hook_name}` uses the Claude Code lifecycle contract; `claw` plugins currently support only PreToolUse, PostToolUse, and PostToolUseFailure."
+                    ),
+                });
+            }
+        }
+    }
+
+    errors
 }
 
 fn plugin_manifest_path(root: &Path) -> Result<PathBuf, PluginError> {
@@ -2093,7 +2163,13 @@ fn materialize_source(
     match source {
         PluginInstallSource::LocalPath { path } => Ok(path.clone()),
         PluginInstallSource::GitUrl { url } => {
-            let destination = temp_root.join(format!("plugin-{}", unix_time_ms()));
+            static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = MATERIALIZE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let destination = temp_root.join(format!("plugin-{nanos}-{unique}"));
             let output = Command::new("git")
                 .arg("clone")
                 .arg("--depth")
@@ -2206,9 +2282,23 @@ fn ensure_object<'a>(root: &'a mut Map<String, Value>, key: &str) -> &'a mut Map
         .expect("object should exist")
 }
 
+/// Environment variable lock for test isolation.
+/// Guards against concurrent modification of `CLAW_CONFIG_HOME`.
+#[cfg(test)]
+fn env_lock() -> &'static std::sync::Mutex<()> {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &ENV_LOCK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -2216,6 +2306,18 @@ mod tests {
             .expect("time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("plugins-{label}-{nanos}"))
+    }
+
+    #[test]
+    fn env_guard_recovers_after_poisoning() {
+        let poisoned = std::thread::spawn(|| {
+            let _guard = env_guard();
+            panic!("poison env lock");
+        })
+        .join();
+        assert!(poisoned.is_err(), "poisoning thread should panic");
+
+        let _guard = env_guard();
     }
 
     fn write_file(path: &Path, contents: &str) {
@@ -2401,6 +2503,7 @@ mod tests {
 
     #[test]
     fn load_plugin_from_directory_validates_required_fields() {
+        let _guard = env_guard();
         let root = temp_dir("manifest-required");
         write_file(
             root.join(MANIFEST_FILE_NAME).as_path(),
@@ -2415,6 +2518,7 @@ mod tests {
 
     #[test]
     fn load_plugin_from_directory_reads_root_manifest_and_validates_entries() {
+        let _guard = env_guard();
         let root = temp_dir("manifest-root");
         write_loader_plugin(&root);
 
@@ -2444,6 +2548,7 @@ mod tests {
 
     #[test]
     fn load_plugin_from_directory_supports_packaged_manifest_path() {
+        let _guard = env_guard();
         let root = temp_dir("manifest-packaged");
         write_external_plugin(&root, "packaged-demo", "1.0.0");
 
@@ -2457,6 +2562,7 @@ mod tests {
 
     #[test]
     fn load_plugin_from_directory_defaults_optional_fields() {
+        let _guard = env_guard();
         let root = temp_dir("manifest-defaults");
         write_file(
             root.join(MANIFEST_FILE_NAME).as_path(),
@@ -2478,6 +2584,7 @@ mod tests {
 
     #[test]
     fn load_plugin_from_directory_rejects_duplicate_permissions_and_commands() {
+        let _guard = env_guard();
         let root = temp_dir("manifest-duplicates");
         write_file(
             root.join("commands").join("sync.sh").as_path(),
@@ -2513,6 +2620,37 @@ mod tests {
             }
             other => panic!("expected manifest validation errors, got {other}"),
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_rejects_claude_code_manifest_contracts_with_guidance() {
+        let root = temp_dir("manifest-claude-code-contract");
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "oh-my-claudecode",
+  "version": "4.10.2",
+  "description": "Claude Code plugin manifest",
+  "hooks": {
+    "SessionStart": ["scripts/session-start.mjs"]
+  },
+  "agents": ["agents/*.md"],
+  "commands": ["commands/**/*.md"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}"#,
+        );
+
+        let error = load_plugin_from_directory(&root)
+            .expect_err("Claude Code plugin manifest should fail with guidance");
+        let rendered = error.to_string();
+        assert!(rendered.contains("field `skills` uses the Claude Code plugin contract"));
+        assert!(rendered.contains("field `mcpServers` uses the Claude Code plugin contract"));
+        assert!(rendered.contains("field `agents` uses the Claude Code plugin contract"));
+        assert!(rendered.contains("field `commands` uses Claude Code-style directory globs"));
+        assert!(rendered.contains("hook `SessionStart` uses the Claude Code lifecycle contract"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2742,6 +2880,7 @@ mod tests {
 
     #[test]
     fn discovers_builtin_and_bundled_plugins() {
+        let _guard = env_guard();
         let manager = PluginManager::new(PluginManagerConfig::new(temp_dir("discover")));
         let plugins = manager.list_plugins().expect("plugins should list");
         assert!(plugins
@@ -2754,6 +2893,7 @@ mod tests {
 
     #[test]
     fn installs_enables_updates_and_uninstalls_external_plugins() {
+        let _guard = env_guard();
         let config_home = temp_dir("home");
         let source_root = temp_dir("source");
         write_external_plugin(&source_root, "demo", "1.0.0");
@@ -2802,6 +2942,7 @@ mod tests {
 
     #[test]
     fn auto_installs_bundled_plugins_into_the_registry() {
+        let _guard = env_guard();
         let config_home = temp_dir("bundled-home");
         let bundled_root = temp_dir("bundled-root");
         write_bundled_plugin(&bundled_root.join("starter"), "starter", "0.1.0", false);
@@ -2833,6 +2974,7 @@ mod tests {
 
     #[test]
     fn default_bundled_root_loads_repo_bundles_as_installed_plugins() {
+        let _guard = env_guard();
         let config_home = temp_dir("default-bundled-home");
         let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
 
@@ -2851,6 +2993,7 @@ mod tests {
 
     #[test]
     fn bundled_sync_prunes_removed_bundled_registry_entries() {
+        let _guard = env_guard();
         let config_home = temp_dir("bundled-prune-home");
         let bundled_root = temp_dir("bundled-prune-root");
         let stale_install_path = config_home
@@ -2914,6 +3057,7 @@ mod tests {
 
     #[test]
     fn installed_plugin_discovery_keeps_registry_entries_outside_install_root() {
+        let _guard = env_guard();
         let config_home = temp_dir("registry-fallback-home");
         let bundled_root = temp_dir("registry-fallback-bundled");
         let install_root = config_home.join("plugins").join("installed");
@@ -2968,6 +3112,7 @@ mod tests {
 
     #[test]
     fn installed_plugin_discovery_prunes_stale_registry_entries() {
+        let _guard = env_guard();
         let config_home = temp_dir("registry-prune-home");
         let bundled_root = temp_dir("registry-prune-bundled");
         let install_root = config_home.join("plugins").join("installed");
@@ -3013,6 +3158,7 @@ mod tests {
 
     #[test]
     fn persists_bundled_plugin_enable_state_across_reloads() {
+        let _guard = env_guard();
         let config_home = temp_dir("bundled-state-home");
         let bundled_root = temp_dir("bundled-state-root");
         write_bundled_plugin(&bundled_root.join("starter"), "starter", "0.1.0", false);
@@ -3046,6 +3192,7 @@ mod tests {
 
     #[test]
     fn persists_bundled_plugin_disable_state_across_reloads() {
+        let _guard = env_guard();
         let config_home = temp_dir("bundled-disabled-home");
         let bundled_root = temp_dir("bundled-disabled-root");
         write_bundled_plugin(&bundled_root.join("starter"), "starter", "0.1.0", true);
@@ -3079,6 +3226,7 @@ mod tests {
 
     #[test]
     fn validates_plugin_source_before_install() {
+        let _guard = env_guard();
         let config_home = temp_dir("validate-home");
         let source_root = temp_dir("validate-source");
         write_external_plugin(&source_root, "validator", "1.0.0");
@@ -3093,6 +3241,7 @@ mod tests {
 
     #[test]
     fn plugin_registry_tracks_enabled_state_and_lookup() {
+        let _guard = env_guard();
         let config_home = temp_dir("registry-home");
         let source_root = temp_dir("registry-source");
         write_external_plugin(&source_root, "registry-demo", "1.0.0");
@@ -3120,6 +3269,7 @@ mod tests {
 
     #[test]
     fn plugin_registry_report_collects_load_failures_without_dropping_valid_plugins() {
+        let _guard = env_guard();
         // given
         let config_home = temp_dir("report-home");
         let external_root = temp_dir("report-external");
@@ -3164,6 +3314,7 @@ mod tests {
 
     #[test]
     fn installed_plugin_registry_report_collects_load_failures_from_install_root() {
+        let _guard = env_guard();
         // given
         let config_home = temp_dir("installed-report-home");
         let bundled_root = temp_dir("installed-report-bundled");
@@ -3194,6 +3345,7 @@ mod tests {
 
     #[test]
     fn rejects_plugin_sources_with_missing_hook_paths() {
+        let _guard = env_guard();
         // given
         let config_home = temp_dir("broken-home");
         let source_root = temp_dir("broken-source");
@@ -3221,6 +3373,7 @@ mod tests {
 
     #[test]
     fn rejects_plugin_sources_with_missing_failure_hook_paths() {
+        let _guard = env_guard();
         // given
         let config_home = temp_dir("broken-failure-home");
         let source_root = temp_dir("broken-failure-source");
@@ -3248,6 +3401,7 @@ mod tests {
 
     #[test]
     fn plugin_registry_runs_initialize_and_shutdown_for_enabled_plugins() {
+        let _guard = env_guard();
         let config_home = temp_dir("lifecycle-home");
         let source_root = temp_dir("lifecycle-source");
         let _ = write_lifecycle_plugin(&source_root, "lifecycle-demo", "1.0.0");
@@ -3271,6 +3425,7 @@ mod tests {
 
     #[test]
     fn aggregates_and_executes_plugin_tools() {
+        let _guard = env_guard();
         let config_home = temp_dir("tool-home");
         let source_root = temp_dir("tool-source");
         write_tool_plugin(&source_root, "tool-demo", "1.0.0");
@@ -3299,6 +3454,7 @@ mod tests {
 
     #[test]
     fn list_installed_plugins_scans_install_root_without_registry_entries() {
+        let _guard = env_guard();
         let config_home = temp_dir("installed-scan-home");
         let bundled_root = temp_dir("installed-scan-bundled");
         let install_root = config_home.join("plugins").join("installed");
@@ -3330,6 +3486,7 @@ mod tests {
 
     #[test]
     fn list_installed_plugins_scans_packaged_manifests_in_install_root() {
+        let _guard = env_guard();
         let config_home = temp_dir("installed-packaged-scan-home");
         let bundled_root = temp_dir("installed-packaged-scan-bundled");
         let install_root = config_home.join("plugins").join("installed");
@@ -3357,5 +3514,144 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    /// Regression test for ROADMAP #41: verify that `CLAW_CONFIG_HOME` isolation prevents
+    /// host `~/.claw/plugins/` from bleeding into test runs.
+    #[test]
+    fn claw_config_home_isolation_prevents_host_plugin_leakage() {
+        let _guard = env_guard();
+
+        // Create a temp directory to act as our isolated CLAW_CONFIG_HOME
+        let config_home = temp_dir("isolated-home");
+        let bundled_root = temp_dir("isolated-bundled");
+
+        // Set CLAW_CONFIG_HOME to our temp directory
+        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+
+        // Create a test fixture plugin in the isolated config home
+        let install_root = config_home.join("plugins").join("installed");
+        let fixture_plugin_root = install_root.join("isolated-test-plugin");
+        write_file(
+            fixture_plugin_root.join(MANIFEST_RELATIVE_PATH).as_path(),
+            r#"{
+  "name": "isolated-test-plugin",
+  "version": "1.0.0",
+  "description": "Test fixture plugin in isolated config home"
+}"#,
+        );
+
+        // Create PluginManager with isolated bundled_root - it should use the temp config_home, not host ~/.claw/
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let manager = PluginManager::new(config);
+
+        // List installed plugins - should only see the test fixture, not host plugins
+        let installed = manager
+            .list_installed_plugins()
+            .expect("installed plugins should list");
+
+        // Verify we only see the test fixture plugin
+        assert_eq!(
+            installed.len(),
+            1,
+            "should only see the test fixture plugin, not host ~/.claw/plugins/"
+        );
+        assert_eq!(
+            installed[0].metadata.id, "isolated-test-plugin@external",
+            "should see the test fixture plugin"
+        );
+
+        // Cleanup
+        std::env::remove_var("CLAW_CONFIG_HOME");
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn plugin_lifecycle_handles_parallel_execution() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let _guard = env_guard();
+
+        // Shared base directory for all threads
+        let base_dir = temp_dir("parallel-base");
+
+        // Track successful installations and any errors
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let error_count = Arc::new(AtomicUsize::new(0));
+
+        // Spawn multiple threads to install plugins simultaneously
+        let mut handles = Vec::new();
+        for thread_id in 0..5 {
+            let base_dir = base_dir.clone();
+            let success_count = Arc::clone(&success_count);
+            let error_count = Arc::clone(&error_count);
+
+            let handle = thread::spawn(move || {
+                // Create unique directories for this thread
+                let config_home = base_dir.join(format!("config-{thread_id}"));
+                let source_root = base_dir.join(format!("source-{thread_id}"));
+
+                // Write lifecycle plugin for this thread
+                let _log_path =
+                    write_lifecycle_plugin(&source_root, &format!("parallel-{thread_id}"), "1.0.0");
+
+                // Create PluginManager and install
+                let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+                let install_result = manager.install(source_root.to_str().expect("utf8 path"));
+
+                match install_result {
+                    Ok(install) => {
+                        let log_path = install.install_path.join("lifecycle.log");
+
+                        // Initialize and shutdown the registry to trigger lifecycle hooks
+                        let registry = manager.plugin_registry();
+                        match registry {
+                            Ok(registry) => {
+                                if registry.initialize().is_ok() && registry.shutdown().is_ok() {
+                                    // Verify lifecycle.log exists and has expected content
+                                    if let Ok(log) = fs::read_to_string(&log_path) {
+                                        if log == "init\nshutdown\n" {
+                                            success_count.fetch_add(1, AtomicOrdering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                error_count.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        error_count.fetch_add(1, AtomicOrdering::Relaxed);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("thread should complete");
+        }
+
+        // Verify all threads succeeded without collisions
+        let successes = success_count.load(AtomicOrdering::Relaxed);
+        let errors = error_count.load(AtomicOrdering::Relaxed);
+
+        assert_eq!(
+            successes, 5,
+            "all 5 parallel plugin installations should succeed"
+        );
+        assert_eq!(
+            errors, 0,
+            "no errors should occur during parallel execution"
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(base_dir);
     }
 }
