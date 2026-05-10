@@ -20,10 +20,10 @@ Cargo.lock
 .claude/
 
 # Claw Code local artifacts
-.claw/settings.local.json
-.claw/sessions/
-.claw/
-.claw
+#.claw/settings.local.json
+#.claw/sessions/
+#.claw/
+#.claw
 
 # Sandbox directories (contain rustup toolchains with large binaries)
 .sandbox-home/
@@ -31,8 +31,8 @@ Cargo.lock
 
 # Project config files (local only)
 .claude.json
-.claw.json
-.clawd-todos.json
+#.claw.json
+#.clawd-todos.json
 
 # GitHub related files
 .github/
