@@ -1,5 +1,7 @@
 # Resiliance Mode Robustness Refactor Plan
 
+Use red/green Test Driven Development approach: Red phase: Write a failing test for the functionality you want to develop from Phases 1-4 of Resiliance_mode_robustness_refactor_plan.md  ; Green phase: Write the minimal application code needed to make the test pass. Focus on making it work, not making it perfect. Refactor phase: Improve the code quality while keeping all tests passing.
+
 ## Overview
 
 This plan outlines a comprehensive refactoring to implement a "resiliance" mode that makes the Claw Code application extremely robust by implementing automatic recovery strategies for various error conditions. The plan builds upon the existing resilience layer concepts and specifies exact code modifications needed to handle the target errors:
@@ -251,7 +253,7 @@ Based on codebase analysis, the following files require modifications:
    * max_estimated_tokens = 4000 (adjustable)
 4. If compaction succeeds, retry with compacted session
 5. If compaction fails or not eligible:
-   a. Truncate last user message by 50%
+   a. Compact without last 2 message blocks, then add back after compaction
    b. Retry request
    c. If still fails, truncate further and retry (max 3 attempts)
 6. If all fails, return error with context reduction recommendation
