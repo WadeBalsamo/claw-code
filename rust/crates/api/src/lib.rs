@@ -35,6 +35,9 @@ pub use providers::{
 };
 pub use resilience_config::ResilienceConfig;
 pub use sse::{parse_frame, SseParser};
+
+#[cfg(test)]
+pub mod resilience_tests;
 pub use types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
