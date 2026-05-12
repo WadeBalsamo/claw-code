@@ -24,6 +24,8 @@ Cargo.lock
 .claw/sessions/
 .claw/
 .claw
+rust/.claw/
+rust/.claude/
 
 # Sandbox directories (contain rustup toolchains with large binaries)
 .sandbox-home/
