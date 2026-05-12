@@ -85,6 +85,18 @@ pub enum ApiError {
         model: String,
         timeout_ms: u64,
     },
+    // New error types for better handling
+    /// Tool sequence error - tool_use blocks must be followed by tool_result
+    ToolSequenceError {
+        request_id: Option<String>,
+        body: String,
+    },
+    /// Stream debug info for extensive debugging of empty stream issues
+    StreamDebugInfo {
+        message: String,
+        tokens_produced: Option<u32>,
+        stream_events: Vec<String>,
+    },
 }
 
 impl ApiError {
@@ -143,6 +155,10 @@ impl ApiError {
             Self::Http(error) => error.is_connect() || error.is_timeout() || error.is_request(),
             Self::Api { retryable, .. } => *retryable,
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
+            // New tool sequence errors are retryable
+            Self::ToolSequenceError { .. } => true,
+            // Stream debug info is not a failure state
+            Self::StreamDebugInfo { .. } => false,
             Self::LocalModelUnloaded { .. }
             | Self::EmptyAssistantStream { .. }
             | Self::FirstTokenTimeout { .. } => true,
@@ -163,6 +179,7 @@ impl ApiError {
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::Api { request_id, .. } => request_id.as_deref(),
+            Self::ToolSequenceError { request_id, .. } => request_id.as_deref(),
             Self::RetriesExhausted { last_error, .. } => last_error.request_id(),
             Self::MissingCredentials { .. }
             | Self::ContextWindowExceeded { .. }

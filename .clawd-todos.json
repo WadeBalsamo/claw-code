@@ -1,47 +1,22 @@
 [
   {
-    "content": "Explore current codebase structure and existing resilience implementation",
-    "activeForm": "Exploring current codebase structure",
-    "status": "completed"
-  },
-  {
-    "content": "Create resilience tests module with failing tests for error handlers (Red phase)",
-    "activeForm": "Creating resilience tests module",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Enhance ResilienceConfig with error-type-specific settings",
-    "activeForm": "Implementing Phase 1 - ResilienceConfig enhancements",
+    "content": "Add StreamDebugContext, StreamResult structs to hooks.rs",
+    "activeForm": "Adding StreamDebugContext and StreamResult structs",
     "status": "in_progress"
   },
   {
-    "content": "Phase 2: Implement safe deserialization and payload size guarding in API client",
-    "activeForm": "Implementing safe deserialization and payload size guarding",
+    "content": "Add HookStreamDebugger trait to hooks.rs",
+    "activeForm": "Adding HookStreamDebugger trait",
     "status": "pending"
   },
   {
-    "content": "Phase 3: Add basic error classification in API client (ApiError)",
-    "activeForm": "Adding error classification to ApiError",
+    "content": "Extend HookRunner with stream_debug_hooks field and methods",
+    "activeForm": "Extending HookRunner for stream debugging",
     "status": "pending"
   },
   {
-    "content": "Phase 4: Implement model reloaded error handling with retry/backoff",
-    "activeForm": "Implementing model reloaded error handling",
-    "status": "pending"
-  },
-  {
-    "content": "Phase 5: Add context size exceeded recovery with compaction",
-    "activeForm": "Implementing context size exceeded recovery",
-    "status": "pending"
-  },
-  {
-    "content": "Phase 6: Implement assistant stream no content recovery",
-    "activeForm": "Implementing empty stream error handling",
-    "status": "pending"
-  },
-  {
-    "content": "Run cargo test to verify all tests pass (Green phase)",
-    "activeForm": "Running verification tests",
+    "content": "Export new types from runtime/src/lib.rs",
+    "activeForm": "Exporting new hook types",
     "status": "pending"
   }
 ]

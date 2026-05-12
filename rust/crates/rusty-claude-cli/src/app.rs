@@ -1,5 +1,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use crate::args::{OutputFormat, PermissionMode};
 use crate::input::{LineEditor, ReadOutcome};

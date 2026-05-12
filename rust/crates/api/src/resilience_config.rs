@@ -6,6 +6,8 @@
 /// - `none` - Force disable resilience on all providers/URLs
 /// - `auto` or unset - Default behavior (auto-detect localhost)
 
+use std::time::Duration;
+
 #[derive(Debug, Clone)]
 pub struct ResilienceConfig {
     /// Force enable resilience recovery regardless of provider/URL
@@ -22,6 +24,46 @@ pub struct ResilienceConfig {
 
     /// Enable for OpenAI-compatible endpoints (default: auto-detect localhost)
     pub enable_for_openai_compat: bool,
+
+    // Error-specific retry configurations
+    /// Maximum retries for model reloaded errors
+    pub model_reloaded_max_retries: u32,
+    /// Maximum retries for context size exceeded errors
+    pub context_exceeded_max_retries: u32,
+    /// Maximum retries for empty stream errors
+    pub stream_empty_max_retries: u32,
+    /// Maximum retries for decoding errors
+    pub decoding_error_max_retries: u32,
+    /// Maximum retries for model unloaded errors
+    pub model_unloaded_max_retries: u32,
+    /// Maximum retries for tool sequence errors
+    pub tool_sequence_error_max_retries: u32,
+
+    // Backoff configurations (initial backoff duration)
+    /// Initial backoff for model reloaded errors
+    pub model_reloaded_initial_backoff: Duration,
+    /// Initial backoff for context exceeded errors
+    pub context_exceeded_initial_backoff: Duration,
+    /// Initial backoff for stream empty errors
+    pub stream_empty_initial_backoff: Duration,
+    /// Initial backoff for decoding errors
+    pub decoding_error_initial_backoff: Duration,
+    /// Initial backoff for model unloaded errors
+    pub model_unloaded_initial_backoff: Duration,
+    /// Initial backoff for tool sequence errors
+    pub tool_sequence_error_initial_backoff: Duration,
+
+    // Context management thresholds (0.0 to 1.0)
+    /// Warning threshold for context usage percentage (default: 0.8 = 80%)
+    pub context_warning_threshold: f32,
+    /// Critical threshold for context usage percentage (default: 0.95 = 95%)
+    pub context_critical_threshold: f32,
+
+    // Compaction strategies
+    /// Preserve recent messages count for aggressive compaction
+    pub aggressive_compaction_preserve_recent: usize,
+    /// Preserve recent messages count for conservative compaction
+    pub conservative_compaction_preserve_recent: usize,
 }
 
 impl ResilienceConfig {
@@ -33,6 +75,26 @@ impl ResilienceConfig {
             auto_enable_for_local: true,
             enable_for_anthropic: false,
             enable_for_openai_compat: true,
+            // Error-specific retry configurations
+            model_reloaded_max_retries: 3,
+            context_exceeded_max_retries: 2,
+            stream_empty_max_retries: 3,
+            decoding_error_max_retries: 2,
+            model_unloaded_max_retries: 5,
+            tool_sequence_error_max_retries: 2,
+            // Backoff configurations
+            model_reloaded_initial_backoff: Duration::from_secs(1),
+            context_exceeded_initial_backoff: Duration::from_secs(2),
+            stream_empty_initial_backoff: Duration::from_secs(1),
+            decoding_error_initial_backoff: Duration::from_secs(1),
+            model_unloaded_initial_backoff: Duration::from_secs(3),
+            tool_sequence_error_initial_backoff: Duration::from_secs(1),
+            // Context management thresholds
+            context_warning_threshold: 0.8,
+            context_critical_threshold: 0.95,
+            // Compaction strategies
+            aggressive_compaction_preserve_recent: 1,
+            conservative_compaction_preserve_recent: 3,
         }
     }
 
@@ -44,6 +106,26 @@ impl ResilienceConfig {
             auto_enable_for_local: true,
             enable_for_anthropic: true,
             enable_for_openai_compat: true,
+            // Error-specific retry configurations (higher for forced enable)
+            model_reloaded_max_retries: 5,
+            context_exceeded_max_retries: 3,
+            stream_empty_max_retries: 5,
+            decoding_error_max_retries: 3,
+            model_unloaded_max_retries: 10,
+            tool_sequence_error_max_retries: 3,
+            // Backoff configurations
+            model_reloaded_initial_backoff: Duration::from_secs(1),
+            context_exceeded_initial_backoff: Duration::from_secs(2),
+            stream_empty_initial_backoff: Duration::from_secs(1),
+            decoding_error_initial_backoff: Duration::from_secs(1),
+            model_unloaded_initial_backoff: Duration::from_secs(3),
+            tool_sequence_error_initial_backoff: Duration::from_secs(1),
+            // Context management thresholds
+            context_warning_threshold: 0.8,
+            context_critical_threshold: 0.95,
+            // Compaction strategies (more aggressive for forced enable)
+            aggressive_compaction_preserve_recent: 1,
+            conservative_compaction_preserve_recent: 3,
         }
     }
 
@@ -55,6 +137,26 @@ impl ResilienceConfig {
             auto_enable_for_local: false,
             enable_for_anthropic: false,
             enable_for_openai_compat: false,
+            // Error-specific retry configurations (none for forced disable)
+            model_reloaded_max_retries: 0,
+            context_exceeded_max_retries: 0,
+            stream_empty_max_retries: 0,
+            decoding_error_max_retries: 0,
+            model_unloaded_max_retries: 0,
+            tool_sequence_error_max_retries: 0,
+            // Backoff configurations
+            model_reloaded_initial_backoff: Duration::from_secs(0),
+            context_exceeded_initial_backoff: Duration::from_secs(0),
+            stream_empty_initial_backoff: Duration::from_secs(0),
+            decoding_error_initial_backoff: Duration::from_secs(0),
+            model_unloaded_initial_backoff: Duration::from_secs(0),
+            tool_sequence_error_initial_backoff: Duration::from_secs(0),
+            // Context management thresholds
+            context_warning_threshold: 0.8,
+            context_critical_threshold: 0.95,
+            // Compaction strategies
+            aggressive_compaction_preserve_recent: 1,
+            conservative_compaction_preserve_recent: 3,
         }
     }
 

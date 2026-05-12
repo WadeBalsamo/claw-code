@@ -4,6 +4,9 @@
 The Claw Code Rust application crashes when running local models due to context overflow errors:
 - `Context size has been exceeded`
 - `Model unloaded`
+✘ ❌ Request failed
+[error-kind: api_http_error]
+error: api returned 400 Bad Request: {"error":{"message":"Context size has been exceeded."},"message":"Context size has been exceeded."}
 
 These errors currently cause the process to terminate instead of being handled gracefully. The application should be self-healing by automatically compacting conversation history and retrying operations when context limits are reached or models become temporarily unavailable.
 

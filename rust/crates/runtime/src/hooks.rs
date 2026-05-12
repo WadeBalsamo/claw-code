@@ -7,7 +7,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -1102,6 +1102,253 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    // ============================================================================
+    // Stream Debugging Hooks - For tracing and debugging API stream issues
+    // ============================================================================
+
+    use std::time::Instant;
+
+    /// Context passed to stream debugging hooks for tracking stream lifecycle
+    #[derive(Debug, Clone)]
+    pub struct StreamDebugContext {
+        pub request_id: Option<String>,
+        pub model: String,
+        pub attempt: u32,
+        pub resilience_enabled: bool,
+        pub context_usage_percent: Option<f32>,
+        pub consecutive_failures: usize,
+        pub tokens_produced_so_far: Option<u32>,
+    }
+
+    impl StreamDebugContext {
+        #[must_use]
+        pub fn new(model: String, attempt: u32) -> Self {
+            Self {
+                request_id: None,
+                model,
+                attempt,
+                resilience_enabled: false,
+                context_usage_percent: None,
+                consecutive_failures: 0,
+                tokens_produced_so_far: None,
+            }
+        }
+
+        #[must_use]
+        pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+            self.request_id = Some(request_id.into());
+            self
+        }
+
+        #[must_use]
+        pub fn with_resilience_enabled(mut self, enabled: bool) -> Self {
+            self.resilience_enabled = enabled;
+            self
+        }
+
+        #[must_use]
+        pub fn with_context_usage_percent(mut self, percent: f32) -> Self {
+            self.context_usage_percent = Some(percent);
+            self
+        }
+
+        #[must_use]
+        pub fn with_consecutive_failures(mut self, failures: usize) -> Self {
+            self.consecutive_failures = failures;
+            self
+        }
+
+        #[must_use]
+        pub fn with_tokens_produced(mut self, tokens: u32) -> Self {
+            self.tokens_produced_so_far = Some(tokens);
+            self
+        }
+    }
+
+    /// Result of a stream operation for debugging
+    #[derive(Debug, Clone)]
+    pub struct StreamResult {
+        pub events_produced: usize,
+        pub tokens_produced: Option<u32>,
+        pub duration: Duration,
+        pub success: bool,
+    }
+
+    impl StreamResult {
+        #[must_use]
+        pub fn new(events_produced: usize, success: bool) -> Self {
+            Self {
+                events_produced,
+                tokens_produced: None,
+                duration: Duration::ZERO,
+                success,
+            }
+        }
+
+        #[must_use]
+        pub fn with_tokens(mut self, tokens: u32) -> Self {
+            self.tokens_produced = Some(tokens);
+            self
+        }
+
+        #[must_use]
+        pub fn with_duration(mut self, duration: Duration) -> Self {
+            self.duration = duration;
+            self
+        }
+    }
+
+    /// Trait for stream debugging hooks - allows monitoring and logging of stream lifecycle events
+    pub trait HookStreamDebugger {
+        /// Called when a stream starts
+        fn on_stream_start(
+            &mut self,
+            request: &MessageRequest,
+            context: &StreamDebugContext,
+        ) -> HookRunResult;
+
+        /// Called for each chunk received during streaming
+        fn on_stream_chunk(
+            &mut self,
+            chunk: &[u8],
+            context: &StreamDebugContext,
+        ) -> HookRunResult;
+
+        /// Called when a stream completes (successfully or not)
+        fn on_stream_end(
+            &mut self,
+            result: &StreamResult,
+            context: &StreamDebugContext,
+        ) -> HookRunResult;
+
+        /// Called when a stream error occurs
+        fn on_stream_error(
+            &mut self,
+            error: &ApiError,
+            context: &StreamDebugContext,
+        ) -> HookRunResult;
+    }
+
+    /// Default executor for stream debugging hooks - captures debug info for testing
+    #[derive(Default)]
+    pub struct StreamDebugExecutor {
+        captured_starts: Vec<StreamDebugCapture>,
+        captured_chunks: Vec<StreamDebugCapture>,
+        captured_ends: Vec<StreamDebugCapture>,
+        captured_errors: Vec<StreamDebugCapture>,
+        start_time: Option<Instant>,
+    }
+
+    impl StreamDebugExecutor {
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        #[must_use]
+        pub fn captured_starts(&self) -> &[StreamDebugCapture] {
+            &self.captured_starts
+        }
+
+        #[must_use]
+        pub fn captured_chunks(&self) -> &[StreamDebugCapture] {
+            &self.captured_chunks
+        }
+
+        #[must_use]
+        pub fn captured_ends(&self) -> &[StreamDebugCapture] {
+            &self.captured_ends
+        }
+
+        #[must_use]
+        pub fn captured_errors(&self) -> &[StreamDebugCapture] {
+            &self.captured_errors
+        }
+    }
+
+    /// Capture of a stream debugging event
+    #[derive(Debug, Clone)]
+    pub struct StreamDebugCapture {
+        pub timestamp: Instant,
+        pub model: String,
+        pub attempt: u32,
+        pub event_type: StreamDebugEventType,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum StreamDebugEventType {
+        Start { request_model: String },
+        Chunk { chunk_size: usize },
+        End { result: StreamResult },
+        Error { error_message: String },
+    }
+
+    impl HookStreamDebugger for StreamDebugExecutor {
+        fn on_stream_start(
+            &mut self,
+            request: &MessageRequest,
+            context: &StreamDebugContext,
+        ) -> HookRunResult {
+            let capture = StreamDebugCapture {
+                timestamp: Instant::now(),
+                model: context.model.clone(),
+                attempt: context.attempt,
+                event_type: StreamDebugEventType::Start {
+                    request_model: request.model.clone(),
+                },
+            };
+            self.captured_starts.push(capture);
+            HookRunResult::allow(vec![])
+        }
+
+        fn on_stream_chunk(
+            &mut self,
+            chunk: &[u8],
+            context: &StreamDebugContext,
+        ) -> HookRunResult {
+            let capture = StreamDebugCapture {
+                timestamp: Instant::now(),
+                model: context.model.clone(),
+                attempt: context.attempt,
+                event_type: StreamDebugEventType::Chunk { chunk_size: chunk.len() },
+            };
+            self.captured_chunks.push(capture);
+            HookRunResult::allow(vec![])
+        }
+
+        fn on_stream_end(
+            &mut self,
+            result: &StreamResult,
+            context: &StreamDebugContext,
+        ) -> HookRunResult {
+            let capture = StreamDebugCapture {
+                timestamp: Instant::now(),
+                model: context.model.clone(),
+                attempt: context.attempt,
+                event_type: StreamDebugEventType::End { result: result.clone() },
+            };
+            self.captured_ends.push(capture);
+            HookRunResult::allow(vec![])
+        }
+
+        fn on_stream_error(
+            &mut self,
+            error: &ApiError,
+            context: &StreamDebugContext,
+        ) -> HookRunResult {
+            let capture = StreamDebugCapture {
+                timestamp: Instant::now(),
+                model: context.model.clone(),
+                attempt: context.attempt,
+                event_type: StreamDebugEventType::Error {
+                    error_message: error.to_string(),
+                },
+            };
+            self.captured_errors.push(capture);
+            HookRunResult::allow(vec![])
+        }
     }
 
     #[cfg(windows)]
