@@ -1034,6 +1034,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         argument_hint: None,
         resume_supported: true,
     },
+    SlashCommandSpec {
+        name: "resilience",
+        aliases: &[],
+        summary: "Show or set resilience mode (force|none|auto)",
+        argument_hint: Some("[force|none|auto]"),
+        resume_supported: true,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1178,6 +1185,9 @@ pub enum SlashCommand {
     },
     History {
         count: Option<String>,
+    },
+    Resilience {
+        mode: Option<String>,
     },
     Unknown(String),
 }
@@ -1490,6 +1500,9 @@ pub fn validate_slash_command_input(
         "add-dir" => SlashCommand::AddDir { path: remainder },
         "history" => SlashCommand::History {
             count: optional_single_arg(command, &args, "[count]")?,
+        },
+        "resilience" => SlashCommand::Resilience {
+            mode: optional_single_arg(command, &args, "[force|none|auto]")?,
         },
         other => SlashCommand::Unknown(other.to_string()),
     }))

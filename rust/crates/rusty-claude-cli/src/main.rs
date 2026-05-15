@@ -4790,6 +4790,10 @@ impl LiveCli {
                 self.print_prompt_history(count.as_deref());
                 false
             }
+            SlashCommand::Resilience { mode } => {
+                self.handle_resilience_command(mode.as_deref());
+                false
+            }
             SlashCommand::Stats => {
                 let usage = UsageTracker::from_session(self.runtime.session()).cumulative_usage();
                 println!("{}", format_cost_report(usage));
@@ -5496,6 +5500,42 @@ impl LiveCli {
     fn run_issue(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", format_issue_report(context));
         Ok(())
+    }
+
+    fn handle_resilience_command(&self, mode: Option<&str>) {
+        match mode {
+            None => {
+                let current = env::var("CLAW_RESILIENCE").unwrap_or_else(|_| "auto".to_string());
+                println!(
+                    "Resilience\n  Current mode      {}\n  Usage             /resilience [force|none|auto]\n  Description       Controls automatic error recovery and retry behavior\n    force           Always enable resilience features\n    none            Disable all resilience features\n    auto            Use environment variable CLAW_RESILIENCE or default behavior",
+                    current
+                );
+            }
+            Some("force") => {
+                env::set_var("CLAW_RESILIENCE", "force");
+                println!(
+                    "Resilience\n  Result           mode switched\n  Active mode      force\n  Applies to       subsequent API calls and error recovery"
+                );
+            }
+            Some("none") => {
+                env::set_var("CLAW_RESILIENCE", "none");
+                println!(
+                    "Resilience\n  Result           mode switched\n  Active mode      none\n  Applies to       subsequent API calls and error recovery"
+                );
+            }
+            Some("auto") => {
+                env::remove_var("CLAW_RESILIENCE");
+                println!(
+                    "Resilience\n  Result           mode switched\n  Active mode      auto\n  Applies to       uses CLAW_RESILIENCE env var or defaults"
+                );
+            }
+            Some(other) => {
+                eprintln!(
+                    "Invalid resilience mode '{}'. Use force, none, or auto.",
+                    other
+                );
+            }
+        }
     }
 }
 

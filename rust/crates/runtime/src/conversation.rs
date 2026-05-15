@@ -132,6 +132,7 @@ pub struct ConversationRuntime<C, T> {
     max_iterations: usize,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
+    resilience_config: ResilienceConfig,
     auto_compaction_input_tokens_threshold: u32,
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
@@ -158,6 +159,7 @@ where
             permission_policy,
             system_prompt,
             &RuntimeFeatureConfig::default(),
+            ResilienceConfig::default(),
         )
     }
 
@@ -170,6 +172,7 @@ where
         permission_policy: PermissionPolicy,
         system_prompt: Vec<String>,
         feature_config: &RuntimeFeatureConfig,
+        resilience_config: ResilienceConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
         Self {

@@ -80,7 +80,9 @@ pub use file_ops::{
 };
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{
-    HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner,
+    HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult,
+    HookRunner, HookStreamDebugger, StreamDebugCapture, StreamDebugContext, StreamDebugExecutor,
+    StreamDebugEventType, StreamResult,
 };
 pub use lane_events::{
     compute_event_fingerprint, dedupe_superseded_commit_events, dedupe_terminal_events,

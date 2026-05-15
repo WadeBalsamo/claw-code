@@ -1,8 +1,4 @@
-rust/.claw.json
-rust/.claw/sessions/session-1775386832313-0.jsonl
-rust/.claw/sessions/session-1775386842352-0.jsonl
-rust/.claw/sessions/session-1775386852257-0.jsonl
-rust/.claw/sessions/session-1775386853666-0.jsonl
+
 rust/crates/api/src/client.rs
 rust/crates/api/src/error.rs
 rust/crates/api/src/lib.rs
