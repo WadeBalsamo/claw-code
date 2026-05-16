@@ -231,9 +231,9 @@ if [ -z "$MODEL" ]; then
   SAVED=""; [ -f "$MODEL_FILE" ] && SAVED="$(cat "$MODEL_FILE")"
   EFFECTIVE="${SAVED:-$DEFAULT_MODEL}"
   echo "default: $EFFECTIVE" >&2
-  local -a RECENTS=(); [ -f "$RECENTS_FILE" ] && mapfile -t RECENTS < <(head -n "$MAX_RECENTS" "$RECENTS_FILE")
+  RECENTS=(); [ -f "$RECENTS_FILE" ] && mapfile -t RECENTS < <(head -n "$MAX_RECENTS" "$RECENTS_FILE")
   if [ "${#RECENTS[@]}" -gt 0 ]; then
-    local i=1; for m in "${RECENTS[@]}"; do printf '  %d) %s\n' "$i" "$m" >&2; i=$((i+1)); done
+    i=1; for m in "${RECENTS[@]}"; do printf '  %d) %s\n' "$i" "$m" >&2; i=$((i+1)); done
   fi
   echo "Enter/d=default b=browse c=custom q=quit" >&2
   read -rp "> " pick; pick="${pick:-d}"
