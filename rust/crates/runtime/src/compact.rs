@@ -21,6 +21,44 @@ impl Default for CompactionConfig {
     }
 }
 
+/// Compaction strategy for different context pressure levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionStrategy {
+    /// Standard compaction — balanced between context preservation and reduction.
+    Standard,
+    /// Aggressive compaction — minimizes context to fit within tight limits.
+    Aggressive,
+    /// Conservative compaction — preserves more context, only compacts when necessary.
+    Conservative,
+    /// Emergency compaction — minimal viable summary for critical context overflow.
+    Emergency,
+}
+
+impl CompactionStrategy {
+    /// Returns the compaction config for this strategy.
+    #[must_use]
+    pub fn config(self) -> CompactionConfig {
+        match self {
+            Self::Standard => CompactionConfig {
+                preserve_recent_messages: 6,
+                max_estimated_tokens: 8_000,
+            },
+            Self::Aggressive => CompactionConfig {
+                preserve_recent_messages: 4,
+                max_estimated_tokens: 5_000,
+            },
+            Self::Conservative => CompactionConfig {
+                preserve_recent_messages: 10,
+                max_estimated_tokens: 12_000,
+            },
+            Self::Emergency => CompactionConfig {
+                preserve_recent_messages: 2,
+                max_estimated_tokens: 3_000,
+            },
+        }
+    }
+}
+
 /// Result of compacting a session into a summary plus preserved tail messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
@@ -42,12 +80,26 @@ pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
     let start = compacted_summary_prefix_len(session);
     let compactable = &session.messages[start..];
 
+    // BUG FIX: Account for system prompt overhead. The system prompt + existing
+    // summary can consume 5,000-10,000 tokens on their own, so we need to trigger
+    // compaction earlier than the raw message token count suggests.
+    // We estimate the system message overhead and subtract it from the threshold.
+    let system_msg_overhead = session
+        .messages
+        .first()
+        .map(|m| estimate_message_tokens(m))
+        .unwrap_or(0);
+    // Use a more conservative threshold that accounts for system prompt overhead
+    let effective_threshold = config
+        .max_estimated_tokens
+        .saturating_sub(system_msg_overhead);
+
     compactable.len() > config.preserve_recent_messages
         && compactable
             .iter()
             .map(estimate_message_tokens)
             .sum::<usize>()
-            >= config.max_estimated_tokens
+            >= effective_threshold
 }
 
 /// Normalizes a compaction summary into user-facing continuation text.
@@ -260,7 +312,13 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
     }
 
     lines.push("- Key timeline:".to_string());
-    for message in messages {
+    // BUG FIX: Limit timeline to last 10 messages to prevent unbounded growth.
+    // Without this, each compaction adds a full timeline of every removed message,
+    // and merge_compact_summaries stacks them. After 3-4 compactions, the system
+    // message alone can consume 10,000-20,000 tokens.
+    let timeline_limit = 10;
+    let timeline_start = messages.len().saturating_sub(timeline_limit);
+    for message in &messages[timeline_start..] {
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User => "user",
@@ -274,6 +332,12 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
             .collect::<Vec<_>>()
             .join(" | ");
         lines.push(format!("  - {role}: {content}"));
+    }
+    if timeline_start > 0 {
+        lines.push(format!(
+            "  - … {} earlier messages omitted from timeline",
+            timeline_start
+        ));
     }
     lines.push("</summary>".to_string());
     lines.join("\n")
@@ -445,11 +509,13 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
         .blocks
         .iter()
         .map(|block| match block {
-            ContentBlock::Text { text } => text.len() / 4 + 1,
-            ContentBlock::ToolUse { name, input, .. } => (name.len() + input.len()) / 4 + 1,
+            ContentBlock::Text { text } => text.chars().count() / 3 + 1,
+            ContentBlock::ToolUse { name, input, .. } => {
+                (name.chars().count() + input.chars().count()) / 3 + 1
+            }
             ContentBlock::ToolResult {
                 tool_name, output, ..
-            } => (tool_name.len() + output.len()) / 4 + 1,
+            } => (tool_name.chars().count() + output.chars().count()) / 3 + 1,
         })
         .sum()
 }

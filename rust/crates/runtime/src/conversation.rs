@@ -15,8 +15,380 @@ use crate::permissions::{
 use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::usage::{TokenUsage, UsageTracker};
 
+use std::time::Duration;
+
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
+
+/// Resilience configuration for the conversation runtime and API clients.
+///
+/// This is the canonical `ResilienceConfig` used across both the `runtime` and
+/// `api` crates. The `api` crate re-exports this type so there is a single
+/// source of truth.
+///
+/// Can be configured via the `CLAW_RESILIENCE` environment variable:
+/// - `force` — Force enable resilience on all providers/URLs
+/// - `none` — Force disable resilience on all providers/URLs
+/// - `auto` or unset — Default behavior (auto-detect localhost)
+#[derive(Debug, Clone)]
+pub struct ResilienceConfig {
+    /// Force enable resilience recovery regardless of provider/URL
+    pub force_enable: bool,
+    /// Force disable resilience recovery regardless of provider/URL
+    pub force_disable: bool,
+    /// Auto-enable for localhost endpoints (default: true)
+    pub auto_enable_for_local: bool,
+    /// Enable for Anthropic API endpoints (default: false)
+    pub enable_for_anthropic: bool,
+    /// Enable for OpenAI-compatible endpoints (default: true)
+    pub enable_for_openai_compat: bool,
+
+    // Error-specific retry configurations
+    /// Maximum retries for model reloaded errors
+    pub model_reloaded_max_retries: u32,
+    /// Maximum retries for context size exceeded errors
+    pub context_exceeded_max_retries: u32,
+    /// Maximum retries for empty stream errors
+    pub stream_empty_max_retries: u32,
+    /// Maximum retries for decoding errors
+    pub decoding_error_max_retries: u32,
+    /// Maximum retries for model unloaded errors
+    pub model_unloaded_max_retries: u32,
+    /// Maximum retries for tool sequence errors
+    pub tool_sequence_error_max_retries: u32,
+
+    // Backoff configurations (initial backoff duration)
+    /// Initial backoff for model reloaded errors
+    pub model_reloaded_initial_backoff: Duration,
+    /// Initial backoff for context exceeded errors
+    pub context_exceeded_initial_backoff: Duration,
+    /// Initial backoff for stream empty errors
+    pub stream_empty_initial_backoff: Duration,
+    /// Initial backoff for decoding errors
+    pub decoding_error_initial_backoff: Duration,
+    /// Initial backoff for model unloaded errors
+    pub model_unloaded_initial_backoff: Duration,
+    /// Initial backoff for tool sequence errors
+    pub tool_sequence_error_initial_backoff: Duration,
+
+    // Context management thresholds (0.0 to 1.0)
+    /// Warning threshold for context usage percentage (default: 0.8 = 80%)
+    pub context_warning_threshold: f32,
+    /// Critical threshold for context usage percentage (default: 0.95 = 95%)
+    pub context_critical_threshold: f32,
+
+    // Compaction strategies
+    /// Preserve recent messages count for aggressive compaction
+    pub aggressive_compaction_preserve_recent: usize,
+    /// Preserve recent messages count for conservative compaction
+    pub conservative_compaction_preserve_recent: usize,
+
+    // Backoff tuning
+    /// Backoff multiplier for each retry attempt (default: 2.0)
+    pub backoff_multiplier: f64,
+    /// Maximum backoff duration (default: 30s)
+    pub max_backoff: Duration,
+}
+
+impl ResilienceConfig {
+    /// Create default resilience configuration
+    pub fn default() -> Self {
+        Self {
+            force_enable: false,
+            force_disable: false,
+            auto_enable_for_local: true,
+            enable_for_anthropic: false,
+            enable_for_openai_compat: true,
+            model_reloaded_max_retries: 3,
+            context_exceeded_max_retries: 2,
+            stream_empty_max_retries: 3,
+            decoding_error_max_retries: 2,
+            model_unloaded_max_retries: 5,
+            tool_sequence_error_max_retries: 2,
+            model_reloaded_initial_backoff: Duration::from_secs(1),
+            context_exceeded_initial_backoff: Duration::from_secs(2),
+            stream_empty_initial_backoff: Duration::from_secs(1),
+            decoding_error_initial_backoff: Duration::from_secs(1),
+            model_unloaded_initial_backoff: Duration::from_secs(3),
+            tool_sequence_error_initial_backoff: Duration::from_secs(1),
+            context_warning_threshold: 0.8,
+            context_critical_threshold: 0.95,
+            aggressive_compaction_preserve_recent: 1,
+            conservative_compaction_preserve_recent: 3,
+            backoff_multiplier: 2.0,
+            max_backoff: Duration::from_secs(30),
+        }
+    }
+
+    /// Force enable resilience on all providers
+    pub fn force_enable() -> Self {
+        Self {
+            force_enable: true,
+            force_disable: false,
+            auto_enable_for_local: true,
+            enable_for_anthropic: true,
+            enable_for_openai_compat: true,
+            model_reloaded_max_retries: 5,
+            context_exceeded_max_retries: 3,
+            stream_empty_max_retries: 5,
+            decoding_error_max_retries: 3,
+            model_unloaded_max_retries: 10,
+            tool_sequence_error_max_retries: 3,
+            model_reloaded_initial_backoff: Duration::from_secs(1),
+            context_exceeded_initial_backoff: Duration::from_secs(2),
+            stream_empty_initial_backoff: Duration::from_secs(1),
+            decoding_error_initial_backoff: Duration::from_secs(1),
+            model_unloaded_initial_backoff: Duration::from_secs(3),
+            tool_sequence_error_initial_backoff: Duration::from_secs(1),
+            context_warning_threshold: 0.8,
+            context_critical_threshold: 0.95,
+            aggressive_compaction_preserve_recent: 1,
+            conservative_compaction_preserve_recent: 3,
+            backoff_multiplier: 2.0,
+            max_backoff: Duration::from_secs(60),
+        }
+    }
+
+    /// Force disable resilience on all providers
+    pub fn force_disable() -> Self {
+        Self {
+            force_enable: false,
+            force_disable: true,
+            auto_enable_for_local: false,
+            enable_for_anthropic: false,
+            enable_for_openai_compat: false,
+            model_reloaded_max_retries: 0,
+            context_exceeded_max_retries: 0,
+            stream_empty_max_retries: 0,
+            decoding_error_max_retries: 0,
+            model_unloaded_max_retries: 0,
+            tool_sequence_error_max_retries: 0,
+            model_reloaded_initial_backoff: Duration::from_secs(0),
+            context_exceeded_initial_backoff: Duration::from_secs(0),
+            stream_empty_initial_backoff: Duration::from_secs(0),
+            decoding_error_initial_backoff: Duration::from_secs(0),
+            model_unloaded_initial_backoff: Duration::from_secs(0),
+            tool_sequence_error_initial_backoff: Duration::from_secs(0),
+            context_warning_threshold: 0.8,
+            context_critical_threshold: 0.95,
+            aggressive_compaction_preserve_recent: 1,
+            conservative_compaction_preserve_recent: 3,
+            backoff_multiplier: 1.0,
+            max_backoff: Duration::from_secs(0),
+        }
+    }
+
+    /// Create resilience configuration from environment variable CLAW_RESILIENCE
+    pub fn from_env() -> Self {
+        match std::env::var("CLAW_RESILIENCE")
+            .ok()
+            .map(|s| s.to_lowercase())
+        {
+            Some(s) if s == "force" => Self::force_enable(),
+            Some(s) if s == "none" => Self::force_disable(),
+            _ => Self::default(),
+        }
+    }
+
+    /// Check if resilience is enabled
+    pub fn is_enabled(&self) -> bool {
+        if self.force_disable {
+            return false;
+        }
+        self.force_enable || true
+    }
+
+    /// Enable resilience for Anthropic API
+    pub fn with_anthropic_enabled(mut self, enabled: bool) -> Self {
+        self.enable_for_anthropic = enabled;
+        self
+    }
+
+    /// Enable resilience for OpenAI-compatible endpoints
+    pub fn with_openai_compat_enabled(mut self, enabled: bool) -> Self {
+        self.enable_for_openai_compat = enabled;
+        self
+    }
+
+    /// Force enable resilience (overrides all other settings)
+    pub fn with_force_enable(mut self, enabled: bool) -> Self {
+        self.force_enable = enabled;
+        self
+    }
+
+    /// Force disable resilience (overrides all other settings)
+    pub fn with_force_disable(mut self, enabled: bool) -> Self {
+        self.force_disable = enabled;
+        self
+    }
+
+    /// Check if resilience should be enabled for a provider
+    pub fn should_enable_for_provider(&self, provider_name: &str) -> bool {
+        if self.force_enable {
+            return true;
+        }
+        if self.force_disable {
+            return false;
+        }
+        match provider_name.to_lowercase().as_str() {
+            "anthropic" => self.enable_for_anthropic,
+            "openai" | "xai" | "dashscope" | "lm_studio" | "local" => {
+                self.enable_for_openai_compat
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if resilience should be enabled for a specific URL
+    pub fn should_enable_for_url(&self, base_url: &str) -> bool {
+        if self.force_enable {
+            return true;
+        }
+        if self.force_disable {
+            return false;
+        }
+        if self.auto_enable_for_local {
+            let lower = base_url.to_lowercase();
+            if lower.contains("localhost")
+                || lower.contains("127.0.0.1")
+                || lower.contains("local")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the maximum retries for a specific error class
+    pub fn max_retries_for(&self, error_class: &str) -> u32 {
+        if !self.is_enabled() {
+            return 0;
+        }
+        match error_class {
+            "stream_empty" | "empty_stream" | "no_content" => self.stream_empty_max_retries,
+            "context_window" | "context_exceeded" => self.context_exceeded_max_retries,
+            "model_reloaded" => self.model_reloaded_max_retries,
+            "model_unloaded" | "local_model_unloaded" => self.model_unloaded_max_retries,
+            "decoding_error" | "decode" => self.decoding_error_max_retries,
+            "tool_sequence" => self.tool_sequence_error_max_retries,
+            "first_token_timeout" => self.model_reloaded_max_retries,
+            _ => 1,
+        }
+    }
+
+    /// Get the initial backoff duration for a specific error class
+    pub fn initial_backoff_for(&self, error_class: &str) -> Duration {
+        match error_class {
+            "stream_empty" | "empty_stream" | "no_content" => self.stream_empty_initial_backoff,
+            "context_window" | "context_exceeded" => self.context_exceeded_initial_backoff,
+            "model_reloaded" => self.model_reloaded_initial_backoff,
+            "model_unloaded" | "local_model_unloaded" => self.model_unloaded_initial_backoff,
+            "decoding_error" | "decode" => self.decoding_error_initial_backoff,
+            "tool_sequence" => self.tool_sequence_error_initial_backoff,
+            "first_token_timeout" => self.model_unloaded_initial_backoff,
+            _ => Duration::from_secs(1),
+        }
+    }
+
+    /// Calculate backoff duration for a given attempt number, using the
+    /// error-class-specific initial backoff and the shared multiplier/max.
+    pub fn backoff_for_attempt(&self, error_class: &str, attempt: u32) -> Duration {
+        if attempt == 0 {
+            return Duration::from_secs(0);
+        }
+        let initial = self.initial_backoff_for(error_class);
+        let backoff_ms =
+            (initial.as_millis() as f64) * self.backoff_multiplier.powi(attempt as i32 - 1);
+        let capped = std::cmp::min(backoff_ms as u128, self.max_backoff.as_millis());
+        Duration::from_millis(capped as u64)
+    }
+
+    /// Convenience: calculate backoff using the legacy single-argument form
+    /// (uses stream_empty initial backoff as the default).
+    pub fn backoff_for_attempt_legacy(&self, attempt: u32) -> Duration {
+        self.backoff_for_attempt("stream_empty", attempt)
+    }
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self::default()
+    }
+}
+
+/// Error classification for resilience recovery decisions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// Empty stream / assistant produced no content
+    EmptyStream,
+    /// Context window exceeded
+    ContextExceeded,
+    /// Model was reloaded or unloaded
+    ModelReloaded,
+    /// Response decoding error
+    DecodingError,
+    /// Tool sequence error
+    ToolSequence,
+    /// First token timeout
+    FirstTokenTimeout,
+    /// Local model unloaded
+    LocalModelUnloaded,
+    /// Generic / unknown error
+    Other,
+}
+
+impl ErrorClass {
+    /// Classify a RuntimeError into an error class for resilience decisions
+    pub fn classify(error: &RuntimeError) -> Self {
+        let msg = error.message.to_lowercase();
+        if msg.contains("empty stream")
+            || msg.contains("no content")
+            || msg.contains("no output")
+            || msg.contains("produced no content")
+        {
+            Self::EmptyStream
+        } else if msg.contains("context window")
+            || msg.contains("context size")
+            || msg.contains("maximum context length")
+            || msg.contains("too many tokens")
+            || msg.contains("context length exceeded")
+        {
+            Self::ContextExceeded
+        } else if msg.contains("model reloaded") || msg.contains("model unloaded") {
+            Self::ModelReloaded
+        } else if msg.contains("decoding")
+            || msg.contains("decode")
+            || msg.contains("error decoding response body")
+        {
+            Self::DecodingError
+        } else if msg.contains("tool_use")
+            || msg.contains("tool_result")
+            || msg.contains("tool sequence")
+        {
+            Self::ToolSequence
+        } else if msg.contains("first token timeout") || msg.contains("token timeout") {
+            Self::FirstTokenTimeout
+        } else if msg.contains("local model") && msg.contains("unloaded") {
+            Self::LocalModelUnloaded
+        } else {
+            Self::Other
+        }
+    }
+
+    /// Get the string key for this error class
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmptyStream => "stream_empty",
+            Self::ContextExceeded => "context_exceeded",
+            Self::ModelReloaded => "model_reloaded",
+            Self::DecodingError => "decoding_error",
+            Self::ToolSequence => "tool_sequence",
+            Self::FirstTokenTimeout => "first_token_timeout",
+            Self::LocalModelUnloaded => "local_model_unloaded",
+            Self::Other => "other",
+        }
+    }
+}
 
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +509,8 @@ pub struct ConversationRuntime<C, T> {
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
     session_tracer: Option<SessionTracer>,
+    // Resilience tracking state
+    consecutive_stream_failures: usize,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -159,7 +533,6 @@ where
             permission_policy,
             system_prompt,
             &RuntimeFeatureConfig::default(),
-            ResilienceConfig::default(),
         )
     }
 
@@ -172,7 +545,6 @@ where
         permission_policy: PermissionPolicy,
         system_prompt: Vec<String>,
         feature_config: &RuntimeFeatureConfig,
-        resilience_config: ResilienceConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
         Self {
@@ -184,10 +556,12 @@ where
             max_iterations: usize::MAX,
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
+            resilience_config: ResilienceConfig::default(),
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
             session_tracer: None,
+            consecutive_stream_failures: 0,
         }
     }
 
@@ -221,6 +595,13 @@ where
     #[must_use]
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
+        self
+    }
+
+    /// Set the resilience configuration for automatic error recovery.
+    #[must_use]
+    pub fn with_resilience_config(mut self, resilience_config: ResilienceConfig) -> Self {
+        self.resilience_config = resilience_config;
         self
     }
 
@@ -313,6 +694,35 @@ where
         }
     }
 
+    /// Pre-emptively compact the session if the estimated token count
+    /// exceeds the auto-compaction threshold. This prevents "context window
+    /// blocked" errors by compacting before the API call rather than after.
+    fn preemptive_compact_if_needed(&mut self) {
+        let current_tokens = estimate_session_tokens(&self.session);
+        // Also account for system prompt overhead
+        let system_prompt_tokens: usize = self
+            .system_prompt
+            .iter()
+            .map(|s| s.chars().count() / 3 + 1)
+            .sum();
+        let total_estimated = current_tokens + system_prompt_tokens;
+
+        if total_estimated >= self.auto_compaction_input_tokens_threshold as usize {
+            let result = compact_session(
+                &self.session,
+                CompactionConfig {
+                    max_estimated_tokens: 0,
+                    ..CompactionConfig::default()
+                },
+            );
+
+            if result.removed_message_count > 0 {
+                self.session = result.compacted_session;
+                self.usage_tracker = UsageTracker::from_session(&self.session);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn run_turn(
         &mut self,
@@ -331,6 +741,11 @@ where
                 )));
             }
         }
+
+        // Pre-flight context check: estimate total tokens before sending to API.
+        // If the session + system prompt + new input would exceed the threshold,
+        // compact proactively to avoid a "context window blocked" error.
+        self.preemptive_compact_if_needed();
 
         self.record_turn_started(&user_input);
         self.session
@@ -356,7 +771,9 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
-            let events = match self.api_client.stream(request) {
+            // Resilience-aware retry loop: classify errors, apply per-error-type
+            // retry budgets and backoff, and trigger recovery strategies.
+            let events = match self.stream_with_resilience(request) {
                 Ok(events) => events,
                 Err(error) => {
                     self.record_turn_failed(iterations, &error);
@@ -556,9 +973,11 @@ where
     }
 
     fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
-        if self.usage_tracker.cumulative_usage().input_tokens
-            < self.auto_compaction_input_tokens_threshold
-        {
+        // Use actual session token estimate instead of cumulative usage,
+        // because cumulative usage counts tokens from messages that were
+        // already compacted away, causing increasingly aggressive compactions.
+        let current_session_tokens = estimate_session_tokens(&self.session);
+        if current_session_tokens < self.auto_compaction_input_tokens_threshold as usize {
             return None;
         }
 
@@ -575,6 +994,9 @@ where
         }
 
         self.session = result.compacted_session;
+        // Reset usage tracker after compaction so it only counts tokens
+        // from messages that are still in the session.
+        self.usage_tracker = UsageTracker::from_session(&self.session);
         Some(AutoCompactionEvent {
             removed_message_count: result.removed_message_count,
         })
@@ -685,6 +1107,110 @@ where
         attributes.insert("iteration".to_string(), Value::from(iteration as u64));
         attributes.insert("error".to_string(), Value::String(error.to_string()));
         session_tracer.record("turn_failed", attributes);
+    }
+
+    /// Stream with resilience: wraps `api_client.stream()` in a retry loop that
+    /// classifies errors, applies per-error-type retry budgets and backoff, and
+    /// triggers recovery strategies (compaction for context errors, etc.).
+    fn stream_with_resilience(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let mut last_error = None;
+        let mut attempt: u32 = 0;
+
+        loop {
+            attempt += 1;
+            match self.api_client.stream(request.clone()) {
+                Ok(events) => {
+                    // Success — reset consecutive failure counter
+                    self.consecutive_stream_failures = 0;
+                    return Ok(events);
+                }
+                Err(error) => {
+                    let error_class = ErrorClass::classify(&error);
+                    let max_retries = self.resilience_config.max_retries_for(error_class.as_str());
+
+                    // Track consecutive failures
+                    self.consecutive_stream_failures += 1;
+
+                    // Log the error for debugging
+                    eprintln!(
+                        "stream_with_resilience: attempt {attempt}, error_class={:?}, max_retries={max_retries}, consecutive_failures={}",
+                        error_class, max_retries, self.consecutive_stream_failures
+                    );
+
+                    // If no retries left, return the error
+                    if attempt > max_retries {
+                        return Err(error);
+                    }
+
+                    // Apply recovery strategy based on error class
+                    match error_class {
+                        ErrorClass::ContextExceeded => {
+                            // Trigger aggressive compaction
+                            let compact_result = compact_session(
+                                &self.session,
+                                CompactionConfig {
+                                    preserve_recent_messages: self
+                                        .resilience_config
+                                        .aggressive_compaction_preserve_recent,
+                                    max_estimated_tokens: 4000,
+                                },
+                            );
+                            if compact_result.removed_message_count > 0 {
+                                self.session = compact_result.compacted_session;
+                                self.usage_tracker = UsageTracker::from_session(&self.session);
+                            }
+                            // Fall through to backoff + retry
+                        }
+                        ErrorClass::EmptyStream => {
+                            // For empty stream, try context reduction on 2nd+ attempt
+                            if attempt > 1 && self.session.messages.len() > 4 {
+                                // Remove oldest non-system messages (keep system + last 2 exchanges)
+                                let keep_from = self.session.messages.len().saturating_sub(4);
+                                let mut new_messages = Vec::new();
+                                // Keep system message if present
+                                if self.session.messages[0].role
+                                    == crate::session::MessageRole::System
+                                {
+                                    new_messages.push(self.session.messages[0].clone());
+                                }
+                                new_messages.extend(self.session.messages[keep_from..].to_vec());
+                                self.session.messages = new_messages;
+                                self.usage_tracker = UsageTracker::from_session(&self.session);
+                            }
+                            // Fall through to backoff + retry
+                        }
+                        ErrorClass::ModelReloaded | ErrorClass::LocalModelUnloaded => {
+                            // Just backoff and retry — model will come back
+                        }
+                        ErrorClass::DecodingError => {
+                            // Retry with same request — decoding errors are often transient
+                        }
+                        ErrorClass::FirstTokenTimeout => {
+                            // Backoff more aggressively for timeout errors
+                        }
+                        ErrorClass::ToolSequence | ErrorClass::Other => {
+                            // For unknown errors, do one retry then give up
+                            if attempt >= 2 {
+                                return Err(error);
+                            }
+                        }
+                    }
+
+                    // Apply backoff before retrying
+                    let backoff = self
+                        .resilience_config
+                        .backoff_for_attempt(error_class.as_str(), attempt);
+                    if backoff > Duration::from_secs(0) {
+                        std::thread::sleep(backoff);
+                    }
+
+                    last_error = Some(error);
+                }
+            }
+        }
     }
 }
 

@@ -151,24 +151,247 @@ impl HookRunResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+// ============================================================================
+// Stream Debugging Hooks - For tracing and debugging API stream issues
+// ============================================================================
+
+/// Context passed to stream debugging hooks for tracking stream lifecycle.
+#[derive(Debug, Clone)]
+pub struct StreamDebugContext {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub attempt: u32,
+    pub resilience_enabled: bool,
+    pub context_usage_percent: Option<f32>,
+    pub consecutive_failures: usize,
+    pub tokens_produced_so_far: Option<u32>,
+}
+
+impl StreamDebugContext {
+    #[must_use]
+    pub fn new(model: String, attempt: u32) -> Self {
+        Self {
+            request_id: None,
+            model,
+            attempt,
+            resilience_enabled: false,
+            context_usage_percent: None,
+            consecutive_failures: 0,
+            tokens_produced_so_far: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_resilience_enabled(mut self, enabled: bool) -> Self {
+        self.resilience_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_context_usage_percent(mut self, percent: f32) -> Self {
+        self.context_usage_percent = Some(percent);
+        self
+    }
+
+    #[must_use]
+    pub fn with_consecutive_failures(mut self, failures: usize) -> Self {
+        self.consecutive_failures = failures;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tokens_produced(mut self, tokens: u32) -> Self {
+        self.tokens_produced_so_far = Some(tokens);
+        self
+    }
+}
+
+/// Result of a stream operation for debugging.
+#[derive(Debug, Clone)]
+pub struct StreamResult {
+    pub events_produced: usize,
+    pub tokens_produced: Option<u32>,
+    pub duration: Duration,
+    pub success: bool,
+}
+
+impl StreamResult {
+    #[must_use]
+    pub fn new(events_produced: usize, success: bool) -> Self {
+        Self {
+            events_produced,
+            tokens_produced: None,
+            duration: Duration::ZERO,
+            success,
+        }
+    }
+
+    #[must_use]
+    pub fn with_tokens(mut self, tokens: u32) -> Self {
+        self.tokens_produced = Some(tokens);
+        self
+    }
+
+    #[must_use]
+    pub fn with_duration(mut self, duration: Duration) -> Self {
+        self.duration = duration;
+        self
+    }
+}
+
+/// Trait for stream debugging hooks — allows monitoring and logging of
+/// stream lifecycle events to diagnose "no stream" / empty stream errors.
+pub trait HookStreamDebugger: Send {
+    /// Called when a stream starts.
+    fn on_stream_start(&mut self, context: &StreamDebugContext);
+
+    /// Called for each chunk received during streaming.
+    fn on_stream_chunk(&mut self, chunk: &[u8], context: &StreamDebugContext);
+
+    /// Called when a stream completes (successfully or not).
+    fn on_stream_end(&mut self, result: &StreamResult, context: &StreamDebugContext);
+
+    /// Called when a stream error occurs.
+    fn on_stream_error(&mut self, error: &str, context: &StreamDebugContext);
+}
+
+/// Capture of a stream debugging event.
+#[derive(Debug, Clone)]
+pub struct StreamDebugCapture {
+    pub timestamp: Instant,
+    pub model: String,
+    pub attempt: u32,
+    pub event_type: StreamDebugEventType,
+}
+
+/// The type of stream debug event that was captured.
+#[derive(Debug, Clone)]
+pub enum StreamDebugEventType {
+    Start,
+    Chunk { chunk_size: usize },
+    End { result: StreamResult },
+    Error { error_message: String },
+}
+
+/// Default executor for stream debugging hooks — captures debug info for testing.
+#[derive(Default)]
+pub struct StreamDebugExecutor {
+    captured_starts: Vec<StreamDebugCapture>,
+    captured_chunks: Vec<StreamDebugCapture>,
+    captured_ends: Vec<StreamDebugCapture>,
+    captured_errors: Vec<StreamDebugCapture>,
+}
+
+impl StreamDebugExecutor {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn captured_starts(&self) -> &[StreamDebugCapture] {
+        &self.captured_starts
+    }
+
+    #[must_use]
+    pub fn captured_chunks(&self) -> &[StreamDebugCapture] {
+        &self.captured_chunks
+    }
+
+    #[must_use]
+    pub fn captured_ends(&self) -> &[StreamDebugCapture] {
+        &self.captured_ends
+    }
+
+    #[must_use]
+    pub fn captured_errors(&self) -> &[StreamDebugCapture] {
+        &self.captured_errors
+    }
+}
+
+impl HookStreamDebugger for StreamDebugExecutor {
+    fn on_stream_start(&mut self, context: &StreamDebugContext) {
+        self.captured_starts.push(StreamDebugCapture {
+            timestamp: Instant::now(),
+            model: context.model.clone(),
+            attempt: context.attempt,
+            event_type: StreamDebugEventType::Start,
+        });
+    }
+
+    fn on_stream_chunk(&mut self, chunk: &[u8], context: &StreamDebugContext) {
+        self.captured_chunks.push(StreamDebugCapture {
+            timestamp: Instant::now(),
+            model: context.model.clone(),
+            attempt: context.attempt,
+            event_type: StreamDebugEventType::Chunk {
+                chunk_size: chunk.len(),
+            },
+        });
+    }
+
+    fn on_stream_end(&mut self, result: &StreamResult, context: &StreamDebugContext) {
+        self.captured_ends.push(StreamDebugCapture {
+            timestamp: Instant::now(),
+            model: context.model.clone(),
+            attempt: context.attempt,
+            event_type: StreamDebugEventType::End {
+                result: result.clone(),
+            },
+        });
+    }
+
+    fn on_stream_error(&mut self, error: &str, context: &StreamDebugContext) {
+        self.captured_errors.push(StreamDebugCapture {
+            timestamp: Instant::now(),
+            model: context.model.clone(),
+            attempt: context.attempt,
+            event_type: StreamDebugEventType::Error {
+                error_message: error.to_string(),
+            },
+        });
+    }
+}
+
+// ============================================================================
+// HookRunner
+// ============================================================================
+
 pub struct HookRunner {
     config: RuntimeHookConfig,
     stream_debug_hooks: Vec<Box<dyn HookStreamDebugger>>,
 }
 
+impl Default for HookRunner {
+    fn default() -> Self {
+        Self {
+            config: RuntimeHookConfig::default(),
+            stream_debug_hooks: Vec::new(),
+        }
+    }
+}
+
 impl HookRunner {
     #[must_use]
     pub fn new(config: RuntimeHookConfig) -> Self {
-        Self { 
+        Self {
             config,
             stream_debug_hooks: Vec::new(),
         }
     }
 
-    /// Set stream debugging hooks for monitoring stream lifecycle events
+    /// Set stream debugging hooks for monitoring stream lifecycle events.
     #[must_use]
-    pub fn with_stream_debug_hooks(mut self, hooks: Vec<Box<dyn crate::hooks::HookStreamDebugger>>) -> Self {
+    pub fn with_stream_debug_hooks(
+        mut self,
+        hooks: Vec<Box<dyn HookStreamDebugger>>,
+    ) -> Self {
         self.stream_debug_hooks = hooks;
         self
     }
@@ -319,7 +542,544 @@ impl HookRunner {
             None,
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_commands(
+        event: HookEvent,
+        commands: &[String],
+        tool_name: &str,
+        tool_input: &str,
+        tool_output: Option<&str>,
+        is_error: bool,
+        abort_signal: Option<&HookAbortSignal>,
+        mut reporter: Option<&mut dyn HookProgressReporter>,
+    ) -> HookRunResult {
+        if commands.is_empty() {
+            return HookRunResult::allow(Vec::new());
+        }
+
+        if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
+            return HookRunResult {
+                denied: false,
+                failed: false,
+                cancelled: true,
+                messages: vec![format!(
+                    "{} hook cancelled before execution",
+                    event.as_str()
+                )],
+                permission_override: None,
+                permission_reason: None,
+                updated_input: None,
+            };
+        }
+
+        let payload = hook_payload(event, tool_name, tool_input, tool_output, is_error).to_string();
+        let mut result = HookRunResult::allow(Vec::new());
+
+        for command in commands {
+            if let Some(reporter) = reporter.as_deref_mut() {
+                reporter.on_event(&HookProgressEvent::Started {
+                    event,
+                    tool_name: tool_name.to_string(),
+                    command: command.clone(),
+                });
+            }
+
+            match Self::run_command(
+                command,
+                event,
+                tool_name,
+                tool_input,
+                tool_output,
+                is_error,
+                &payload,
+                abort_signal,
+            ) {
+                HookCommandOutcome::Allow { parsed } => {
+                    if let Some(reporter) = reporter.as_deref_mut() {
+                        reporter.on_event(&HookProgressEvent::Completed {
+                            event,
+                            tool_name: tool_name.to_string(),
+                            command: command.clone(),
+                        });
+                    }
+                    merge_parsed_hook_output(&mut result, parsed);
+                }
+                HookCommandOutcome::Deny { parsed } => {
+                    if let Some(reporter) = reporter.as_deref_mut() {
+                        reporter.on_event(&HookProgressEvent::Completed {
+                            event,
+                            tool_name: tool_name.to_string(),
+                            command: command.clone(),
+                        });
+                    }
+                    merge_parsed_hook_output(&mut result, parsed);
+                    result.denied = true;
+                    return result;
+                }
+                HookCommandOutcome::Failed { parsed } => {
+                    if let Some(reporter) = reporter.as_deref_mut() {
+                        reporter.on_event(&HookProgressEvent::Completed {
+                            event,
+                            tool_name: tool_name.to_string(),
+                            command: command.clone(),
+                        });
+                    }
+                    merge_parsed_hook_output(&mut result, parsed);
+                    result.failed = true;
+                    return result;
+                }
+                HookCommandOutcome::Cancelled { message } => {
+                    if let Some(reporter) = reporter.as_deref_mut() {
+                        reporter.on_event(&HookProgressEvent::Cancelled {
+                            event,
+                            tool_name: tool_name.to_string(),
+                            command: command.clone(),
+                        });
+                    }
+                    result.cancelled = true;
+                    result.messages.push(message);
+                    return result;
+                }
+            }
+        }
+
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_command(
+        command: &str,
+        event: HookEvent,
+        tool_name: &str,
+        tool_input: &str,
+        tool_output: Option<&str>,
+        is_error: bool,
+        payload: &str,
+        abort_signal: Option<&HookAbortSignal>,
+    ) -> HookCommandOutcome {
+        let mut child = shell_command(command);
+        child.stdin(Stdio::piped());
+        child.stdout(Stdio::piped());
+        child.stderr(Stdio::piped());
+        child.env("HOOK_EVENT", event.as_str());
+        child.env("HOOK_TOOL_NAME", tool_name);
+        child.env("HOOK_TOOL_INPUT", tool_input);
+        child.env("HOOK_TOOL_IS_ERROR", if is_error { "1" } else { "0" });
+        if let Some(tool_output) = tool_output {
+            child.env("HOOK_TOOL_OUTPUT", tool_output);
+        }
+
+        match child.output_with_stdin(payload.as_bytes(), abort_signal) {
+            Ok(CommandExecution::Finished(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let parsed = parse_hook_output(event, tool_name, command, &stdout, &stderr);
+                let primary_message = parsed.primary_message().map(ToOwned::to_owned);
+                match output.status.code() {
+                    Some(0) => {
+                        if parsed.deny {
+                            HookCommandOutcome::Deny { parsed }
+                        } else {
+                            HookCommandOutcome::Allow { parsed }
+                        }
+                    }
+                    Some(2) => HookCommandOutcome::Deny {
+                        parsed: parsed.with_fallback_message(format!(
+                            "{} hook denied tool `{tool_name}`",
+                            event.as_str()
+                        )),
+                    },
+                    Some(code) => HookCommandOutcome::Failed {
+                        parsed: parsed.with_fallback_message(format_hook_failure(
+                            command,
+                            code,
+                            primary_message.as_deref(),
+                            stderr.as_str(),
+                        )),
+                    },
+                    None => HookCommandOutcome::Failed {
+                        parsed: parsed.with_fallback_message(format!(
+                            "{} hook `{command}` terminated by signal while handling `{}`",
+                            event.as_str(),
+                            tool_name
+                        )),
+                    },
+                }
+            }
+            Ok(CommandExecution::Cancelled) => HookCommandOutcome::Cancelled {
+                message: format!(
+                    "{} hook `{command}` cancelled while handling `{tool_name}`",
+                    event.as_str()
+                ),
+            },
+            Err(error) => HookCommandOutcome::Failed {
+                parsed: ParsedHookOutput {
+                    messages: vec![format!(
+                        "{} hook `{command}` failed to start for `{}`: {error}",
+                        event.as_str(),
+                        tool_name
+                    )],
+                    ..ParsedHookOutput::default()
+                },
+            },
+        }
+    }
 }
+
+enum HookCommandOutcome {
+    Allow { parsed: ParsedHookOutput },
+    Deny { parsed: ParsedHookOutput },
+    Failed { parsed: ParsedHookOutput },
+    Cancelled { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ParsedHookOutput {
+    messages: Vec<String>,
+    deny: bool,
+    permission_override: Option<PermissionOverride>,
+    permission_reason: Option<String>,
+    updated_input: Option<String>,
+}
+
+impl ParsedHookOutput {
+    fn with_fallback_message(mut self, fallback: String) -> Self {
+        if self.messages.is_empty() {
+            self.messages.push(fallback);
+        }
+        self
+    }
+
+    fn primary_message(&self) -> Option<&str> {
+        self.messages.first().map(String::as_str)
+    }
+}
+
+fn merge_parsed_hook_output(target: &mut HookRunResult, parsed: ParsedHookOutput) {
+    target.messages.extend(parsed.messages);
+    if parsed.permission_override.is_some() {
+        target.permission_override = parsed.permission_override;
+    }
+    if parsed.permission_reason.is_some() {
+        target.permission_reason = parsed.permission_reason;
+    }
+    if parsed.updated_input.is_some() {
+        target.updated_input = parsed.updated_input;
+    }
+}
+
+fn parse_hook_output(
+    event: HookEvent,
+    tool_name: &str,
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+) -> ParsedHookOutput {
+    if stdout.is_empty() {
+        return ParsedHookOutput::default();
+    }
+
+    let root = match serde_json::from_str::<Value>(stdout) {
+        Ok(Value::Object(root)) => root,
+        Ok(value) => {
+            return ParsedHookOutput {
+                messages: vec![format_invalid_hook_output(
+                    event,
+                    tool_name,
+                    command,
+                    &format!(
+                        "expected top-level JSON object, got {}",
+                        json_type_name(&value)
+                    ),
+                    stdout,
+                    stderr,
+                )],
+                ..ParsedHookOutput::default()
+            };
+        }
+        Err(error) if looks_like_json_attempt(stdout) => {
+            return ParsedHookOutput {
+                messages: vec![format_invalid_hook_output(
+                    event,
+                    tool_name,
+                    command,
+                    &error.to_string(),
+                    stdout,
+                    stderr,
+                )],
+                ..ParsedHookOutput::default()
+            };
+        }
+        Err(_) => {
+            return ParsedHookOutput {
+                messages: vec![stdout.to_string()],
+                ..ParsedHookOutput::default()
+            };
+        }
+    };
+
+    let mut parsed = ParsedHookOutput::default();
+
+    if let Some(message) = root.get("systemMessage").and_then(Value::as_str) {
+        parsed.messages.push(message.to_string());
+    }
+    if let Some(message) = root.get("reason").and_then(Value::as_str) {
+        parsed.messages.push(message.to_string());
+    }
+    if root.get("continue").and_then(Value::as_bool) == Some(false)
+        || root.get("decision").and_then(Value::as_str) == Some("block")
+    {
+        parsed.deny = true;
+    }
+
+    if let Some(Value::Object(specific)) = root.get("hookSpecificOutput") {
+        if let Some(Value::String(additional_context)) = specific.get("additionalContext") {
+            parsed.messages.push(additional_context.clone());
+        }
+        if let Some(decision) = specific.get("permissionDecision").and_then(Value::as_str) {
+            parsed.permission_override = match decision {
+                "allow" => Some(PermissionOverride::Allow),
+                "deny" => Some(PermissionOverride::Deny),
+                "ask" => Some(PermissionOverride::Ask),
+                _ => None,
+            };
+        }
+        if let Some(reason) = specific
+            .get("permissionDecisionReason")
+            .and_then(Value::as_str)
+        {
+            parsed.permission_reason = Some(reason.to_string());
+        }
+        if let Some(updated_input) = specific.get("updatedInput") {
+            parsed.updated_input = serde_json::to_string(updated_input).ok();
+        }
+    }
+
+    if parsed.messages.is_empty() {
+        parsed.messages.push(stdout.to_string());
+    }
+
+    parsed
+}
+
+fn hook_payload(
+    event: HookEvent,
+    tool_name: &str,
+    tool_input: &str,
+    tool_output: Option<&str>,
+    is_error: bool,
+) -> Value {
+    match event {
+        HookEvent::PostToolUseFailure => json!({
+            "hook_event_name": event.as_str(),
+            "tool_name": tool_name,
+            "tool_input": parse_tool_input(tool_input),
+            "tool_input_json": tool_input,
+            "tool_error": tool_output,
+            "tool_result_is_error": true,
+        }),
+        _ => json!({
+            "hook_event_name": event.as_str(),
+            "tool_name": tool_name,
+            "tool_input": parse_tool_input(tool_input),
+            "tool_input_json": tool_input,
+            "tool_output": tool_output,
+            "tool_result_is_error": is_error,
+        }),
+    }
+}
+
+fn parse_tool_input(tool_input: &str) -> Value {
+    serde_json::from_str(tool_input).unwrap_or_else(|_| json!({ "raw": tool_input }))
+}
+
+fn format_invalid_hook_output(
+    event: HookEvent,
+    tool_name: &str,
+    command: &str,
+    detail: &str,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let stdout_preview = bounded_hook_preview(stdout).unwrap_or_else(|| "<empty>".to_string());
+    let stderr_preview = bounded_hook_preview(stderr).unwrap_or_else(|| "<empty>".to_string());
+    let command_preview = bounded_hook_preview(command).unwrap_or_else(|| "<empty>".to_string());
+
+    format!(
+        "hook_invalid_json: phase={} tool={} command={} detail={} stdout_preview={} stderr_preview={}",
+        event.as_str(),
+        tool_name,
+        command_preview,
+        detail,
+        stdout_preview,
+        stderr_preview
+    )
+}
+
+fn bounded_hook_preview(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut preview = String::new();
+    for (count, ch) in trimmed.chars().enumerate() {
+        if count == HOOK_PREVIEW_CHAR_LIMIT {
+            preview.push('…');
+            break;
+        }
+        match ch {
+            '\n' => preview.push_str("\\n"),
+            '\r' => preview.push_str("\\r"),
+            '\t' => preview.push_str("\\t"),
+            control if control.is_control() => {
+                let _ = write!(&mut preview, "\\u{{{:x}}}", control as u32);
+            }
+            _ => preview.push(ch),
+        }
+    }
+    Some(preview)
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn looks_like_json_attempt(value: &str) -> bool {
+    matches!(value.trim_start().chars().next(), Some('{' | '['))
+}
+
+fn format_hook_failure(command: &str, code: i32, stdout: Option<&str>, stderr: &str) -> String {
+    let mut message = format!("Hook `{command}` exited with status {code}");
+    if let Some(stdout) = stdout.filter(|stdout| !stdout.is_empty()) {
+        message.push_str(": ");
+        message.push_str(stdout);
+    } else if !stderr.is_empty() {
+        message.push_str(": ");
+        message.push_str(stderr);
+    }
+    message
+}
+
+fn shell_command(command: &str) -> CommandWithStdin {
+    #[cfg(windows)]
+    let mut command_builder = {
+        let mut command_builder = Command::new("cmd");
+        command_builder.arg("/C").arg(command);
+        CommandWithStdin::new(command_builder)
+    };
+
+    #[cfg(not(windows))]
+    let command_builder = {
+        let mut command_builder = Command::new("sh");
+        command_builder.arg("-lc").arg(command);
+        CommandWithStdin::new(command_builder)
+    };
+
+    command_builder
+}
+
+struct CommandWithStdin {
+    command: Command,
+}
+
+impl CommandWithStdin {
+    fn new(command: Command) -> Self {
+        Self { command }
+    }
+
+    fn stdin(&mut self, cfg: Stdio) -> &mut Self {
+        self.command.stdin(cfg);
+        self
+    }
+
+    fn stdout(&mut self, cfg: Stdio) -> &mut Self {
+        self.command.stdout(cfg);
+        self
+    }
+
+    fn stderr(&mut self, cfg: Stdio) -> &mut Self {
+        self.command.stderr(cfg);
+        self
+    }
+
+    fn env<K, V>(&mut self, key: K, value: V) -> &mut Self
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.command.env(key, value);
+        self
+    }
+
+    fn output_with_stdin(
+        &mut self,
+        stdin: &[u8],
+        abort_signal: Option<&HookAbortSignal>,
+    ) -> std::io::Result<CommandExecution> {
+        let mut child = self.command.spawn()?;
+        if let Some(mut child_stdin) = child.stdin.take() {
+            child_stdin.write_all(stdin)?;
+        }
+
+        loop {
+            if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Ok(CommandExecution::Cancelled);
+            }
+
+            match child.try_wait()? {
+                Some(_) => return child.wait_with_output().map(CommandExecution::Finished),
+                None => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+}
+
+enum CommandExecution {
+    Finished(std::process::Output),
+    Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{
+        HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult,
+        HookRunner,
+    };
+    use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
+    use crate::permissions::PermissionOverride;
+
+    struct RecordingReporter {
+        events: Vec<HookProgressEvent>,
+    }
+
+    impl HookProgressReporter for RecordingReporter {
+        fn on_event(&mut self, event: &HookProgressEvent) {
+            self.events.push(event.clone());
+        }
+    }
+
+    #[test]
+    fn allows_exit_code_zero_and_captures_stdout() {
+        let runner = HookRunner::new(RuntimeHookConfig::new(
+            vec![shell_snippet("printf 'pre ok'")],
+            Vec::new(),
+            Vec::new(),
+        ));
+
         let result = runner.run_pre_tool_use("Read", r#"{"path":"README.md"}"#);
 
         assert_eq!(result, HookRunResult::allow(vec!["pre ok".to_string()]));
@@ -578,251 +1338,113 @@ impl HookRunner {
         )));
     }
 
-    // ============================================================================
-    // Stream Debugging Hooks - For tracing and debugging API stream issues
-    // ============================================================================
+    // ========================================================================
+    // Stream Debugging Hook Tests
+    // ========================================================================
 
-    use std::time::Instant;
+    #[test]
+    fn stream_debug_executor_captures_start_events() {
+        use super::HookStreamDebugger;
+        use super::StreamDebugContext;
+        use super::StreamDebugExecutor;
 
-    /// Context passed to stream debugging hooks for tracking stream lifecycle
-    #[derive(Debug, Clone)]
-    pub struct StreamDebugContext {
-        pub request_id: Option<String>,
-        pub model: String,
-        pub attempt: u32,
-        pub resilience_enabled: bool,
-        pub context_usage_percent: Option<f32>,
-        pub consecutive_failures: usize,
-        pub tokens_produced_so_far: Option<u32>,
+        let mut executor = StreamDebugExecutor::new();
+        let ctx = StreamDebugContext::new("claude-3-5-sonnet".to_string(), 1)
+            .with_resilience_enabled(true);
+
+        executor.on_stream_start(&ctx);
+
+        assert_eq!(executor.captured_starts().len(), 1);
+        assert_eq!(executor.captured_starts()[0].model, "claude-3-5-sonnet");
+        assert_eq!(executor.captured_starts()[0].attempt, 1);
     }
 
-    impl StreamDebugContext {
-        #[must_use]
-        pub fn new(model: String, attempt: u32) -> Self {
-            Self {
-                request_id: None,
-                model,
-                attempt,
-                resilience_enabled: false,
-                context_usage_percent: None,
-                consecutive_failures: 0,
-                tokens_produced_so_far: None,
+    #[test]
+    fn stream_debug_executor_captures_chunk_events() {
+        use super::HookStreamDebugger;
+        use super::StreamDebugContext;
+        use super::StreamDebugExecutor;
+
+        let mut executor = StreamDebugExecutor::new();
+        let ctx = StreamDebugContext::new("claude-3-5-sonnet".to_string(), 1);
+
+        executor.on_stream_chunk(b"hello world", &ctx);
+
+        assert_eq!(executor.captured_chunks().len(), 1);
+        assert_eq!(executor.captured_chunks()[0].model, "claude-3-5-sonnet");
+        match &executor.captured_chunks()[0].event_type {
+            super::StreamDebugEventType::Chunk { chunk_size } => {
+                assert_eq!(*chunk_size, 11);
             }
-        }
-
-        #[must_use]
-        pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
-            self.request_id = Some(request_id.into());
-            self
-        }
-
-        #[must_use]
-        pub fn with_resilience_enabled(mut self, enabled: bool) -> Self {
-            self.resilience_enabled = enabled;
-            self
-        }
-
-        #[must_use]
-        pub fn with_context_usage_percent(mut self, percent: f32) -> Self {
-            self.context_usage_percent = Some(percent);
-            self
-        }
-
-        #[must_use]
-        pub fn with_consecutive_failures(mut self, failures: usize) -> Self {
-            self.consecutive_failures = failures;
-            self
-        }
-
-        #[must_use]
-        pub fn with_tokens_produced(mut self, tokens: u32) -> Self {
-            self.tokens_produced_so_far = Some(tokens);
-            self
+            _ => panic!("expected Chunk event type"),
         }
     }
 
-    /// Result of a stream operation for debugging
-    #[derive(Debug, Clone)]
-    pub struct StreamResult {
-        pub events_produced: usize,
-        pub tokens_produced: Option<u32>,
-        pub duration: Duration,
-        pub success: bool,
-    }
+    #[test]
+    fn stream_debug_executor_captures_end_events() {
+        use super::HookStreamDebugger;
+        use super::StreamDebugContext;
+        use super::StreamDebugExecutor;
+        use super::StreamResult;
 
-    impl StreamResult {
-        #[must_use]
-        pub fn new(events_produced: usize, success: bool) -> Self {
-            Self {
-                events_produced,
-                tokens_produced: None,
-                duration: Duration::ZERO,
-                success,
+        let mut executor = StreamDebugExecutor::new();
+        let ctx = StreamDebugContext::new("claude-3-5-sonnet".to_string(), 1);
+        let result = StreamResult::new(5, true).with_tokens(42);
+
+        executor.on_stream_end(&result, &ctx);
+
+        assert_eq!(executor.captured_ends().len(), 1);
+        assert_eq!(executor.captured_ends()[0].model, "claude-3-5-sonnet");
+        match &executor.captured_ends()[0].event_type {
+            super::StreamDebugEventType::End { result } => {
+                assert_eq!(result.events_produced, 5);
+                assert_eq!(result.tokens_produced, Some(42));
+                assert!(result.success);
             }
-        }
-
-        #[must_use]
-        pub fn with_tokens(mut self, tokens: u32) -> Self {
-            self.tokens_produced = Some(tokens);
-            self
-        }
-
-        #[must_use]
-        pub fn with_duration(mut self, duration: Duration) -> Self {
-            self.duration = duration;
-            self
+            _ => panic!("expected End event type"),
         }
     }
 
-    /// Trait for stream debugging hooks - allows monitoring and logging of stream lifecycle events
-    pub trait HookStreamDebugger {
-        /// Called when a stream starts
-        fn on_stream_start(
-            &mut self,
-            request: &MessageRequest,
-            context: &StreamDebugContext,
-        ) -> HookRunResult;
+    #[test]
+    fn stream_debug_executor_captures_error_events() {
+        use super::HookStreamDebugger;
+        use super::StreamDebugContext;
+        use super::StreamDebugExecutor;
 
-        /// Called for each chunk received during streaming
-        fn on_stream_chunk(
-            &mut self,
-            chunk: &[u8],
-            context: &StreamDebugContext,
-        ) -> HookRunResult;
+        let mut executor = StreamDebugExecutor::new();
+        let ctx = StreamDebugContext::new("claude-3-5-sonnet".to_string(), 2)
+            .with_consecutive_failures(1);
 
-        /// Called when a stream completes (successfully or not)
-        fn on_stream_end(
-            &mut self,
-            result: &StreamResult,
-            context: &StreamDebugContext,
-        ) -> HookRunResult;
+        executor.on_stream_error("empty stream: no content produced", &ctx);
 
-        /// Called when a stream error occurs
-        fn on_stream_error(
-            &mut self,
-            error: &ApiError,
-            context: &StreamDebugContext,
-        ) -> HookRunResult;
-    }
-
-    /// Default executor for stream debugging hooks - captures debug info for testing
-    #[derive(Default)]
-    pub struct StreamDebugExecutor {
-        captured_starts: Vec<StreamDebugCapture>,
-        captured_chunks: Vec<StreamDebugCapture>,
-        captured_ends: Vec<StreamDebugCapture>,
-        captured_errors: Vec<StreamDebugCapture>,
-        start_time: Option<Instant>,
-    }
-
-    impl StreamDebugExecutor {
-        #[must_use]
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        #[must_use]
-        pub fn captured_starts(&self) -> &[StreamDebugCapture] {
-            &self.captured_starts
-        }
-
-        #[must_use]
-        pub fn captured_chunks(&self) -> &[StreamDebugCapture] {
-            &self.captured_chunks
-        }
-
-        #[must_use]
-        pub fn captured_ends(&self) -> &[StreamDebugCapture] {
-            &self.captured_ends
-        }
-
-        #[must_use]
-        pub fn captured_errors(&self) -> &[StreamDebugCapture] {
-            &self.captured_errors
+        assert_eq!(executor.captured_errors().len(), 1);
+        assert_eq!(executor.captured_errors()[0].attempt, 2);
+        match &executor.captured_errors()[0].event_type {
+            super::StreamDebugEventType::Error { error_message } => {
+                assert_eq!(error_message, "empty stream: no content produced");
+            }
+            _ => panic!("expected Error event type"),
         }
     }
 
-    /// Capture of a stream debugging event
-    #[derive(Debug, Clone)]
-    pub struct StreamDebugCapture {
-        pub timestamp: Instant,
-        pub model: String,
-        pub attempt: u32,
-        pub event_type: StreamDebugEventType,
-    }
+    #[test]
+    fn hook_runner_with_stream_debug_hooks() {
+        use super::HookStreamDebugger;
+        use super::StreamDebugContext;
+        use super::StreamDebugExecutor;
 
-    #[derive(Debug, Clone)]
-    pub enum StreamDebugEventType {
-        Start { request_model: String },
-        Chunk { chunk_size: usize },
-        End { result: StreamResult },
-        Error { error_message: String },
-    }
+        let executor = StreamDebugExecutor::new();
+        let runner = HookRunner::new(RuntimeHookConfig::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ))
+        .with_stream_debug_hooks(vec![Box::new(executor)]);
 
-    impl HookStreamDebugger for StreamDebugExecutor {
-        fn on_stream_start(
-            &mut self,
-            request: &MessageRequest,
-            context: &StreamDebugContext,
-        ) -> HookRunResult {
-            let capture = StreamDebugCapture {
-                timestamp: Instant::now(),
-                model: context.model.clone(),
-                attempt: context.attempt,
-                event_type: StreamDebugEventType::Start {
-                    request_model: request.model.clone(),
-                },
-            };
-            self.captured_starts.push(capture);
-            HookRunResult::allow(vec![])
-        }
-
-        fn on_stream_chunk(
-            &mut self,
-            chunk: &[u8],
-            context: &StreamDebugContext,
-        ) -> HookRunResult {
-            let capture = StreamDebugCapture {
-                timestamp: Instant::now(),
-                model: context.model.clone(),
-                attempt: context.attempt,
-                event_type: StreamDebugEventType::Chunk { chunk_size: chunk.len() },
-            };
-            self.captured_chunks.push(capture);
-            HookRunResult::allow(vec![])
-        }
-
-        fn on_stream_end(
-            &mut self,
-            result: &StreamResult,
-            context: &StreamDebugContext,
-        ) -> HookRunResult {
-            let capture = StreamDebugCapture {
-                timestamp: Instant::now(),
-                model: context.model.clone(),
-                attempt: context.attempt,
-                event_type: StreamDebugEventType::End { result: result.clone() },
-            };
-            self.captured_ends.push(capture);
-            HookRunResult::allow(vec![])
-        }
-
-        fn on_stream_error(
-            &mut self,
-            error: &ApiError,
-            context: &StreamDebugContext,
-        ) -> HookRunResult {
-            let capture = StreamDebugCapture {
-                timestamp: Instant::now(),
-                model: context.model.clone(),
-                attempt: context.attempt,
-                event_type: StreamDebugEventType::Error {
-                    error_message: error.to_string(),
-                },
-            };
-            self.captured_errors.push(capture);
-            HookRunResult::allow(vec![])
-        }
+        // Verify the runner was constructed successfully with stream debug hooks
+        let result = runner.run_pre_tool_use("Read", r#"{"path":"README.md"}"#);
+        assert!(!result.is_denied());
+        assert!(!result.is_failed());
     }
 
     #[cfg(windows)]

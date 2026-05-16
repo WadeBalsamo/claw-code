@@ -1,0 +1,10 @@
+{
+  "preset_name": "dev-frontend",
+  "description": "Frontend development agent with JS/TS, React, CSS focus",
+  "model_alias": "qwen3:14b",
+  "system_prompt": "You are a frontend development specialist. Write clean, modern code.",
+  "allowed_tools": ["read_file", "write_file", "edit_file", "glob_search", "grep_search", "bash"],
+  "max_context": 32768,
+  "temperature": 0.3,
+  "permission_mode": "danger-full-access"
+}

@@ -1,47 +1,22 @@
 [
   {
-    "content": "Update Refactor-plan.md with current status",
-    "activeForm": "Updating Refactor-plan.md with current status",
-    "status": "completed"
-  },
-  {
-    "content": "Add /resilience slash command to SlashCommand enum and parser",
-    "activeForm": "Adding /resilience slash command to commands/src/lib.rs",
-    "status": "completed"
-  },
-  {
-    "content": "Wire /resilience into CLI parse_args and main dispatch",
-    "activeForm": "Wiring /resilience into CLI dispatch in main.rs",
+    "content": "Build the run-claw-code bash entry point script",
+    "activeForm": "Building run-claw-code entry point",
     "status": "in_progress"
   },
   {
-    "content": "Implement resilience status display and mode switching",
-    "activeForm": "Implementing resilience status display",
+    "content": "Build the claw-scheduler daemon for resource management",
+    "activeForm": "Building claw-scheduler daemon",
     "status": "pending"
   },
   {
-    "content": "Add resilience field tracking to conversation.rs",
-    "activeForm": "Adding resilience tracking fields to conversation.rs",
+    "content": "Create install rules and systemd integration",
+    "activeForm": "Creating install integration",
     "status": "pending"
   },
   {
-    "content": "Implement error classification and recovery in conversation.rs run_turn",
-    "activeForm": "Implementing error recovery in run_turn",
-    "status": "pending"
-  },
-  {
-    "content": "Add resilience-aware methods to anthropic.rs",
-    "activeForm": "Adding resilience methods to anthropic.rs",
-    "status": "pending"
-  },
-  {
-    "content": "Add CompactionStrategy enum and strategy-specific compaction",
-    "activeForm": "Adding compaction strategies to compact.rs",
-    "status": "pending"
-  },
-  {
-    "content": "Build and test the changes",
-    "activeForm": "Building and testing changes",
+    "content": "Test the complete run-claw-code flow",
+    "activeForm": "Testing the full flow",
     "status": "pending"
   }
 ]

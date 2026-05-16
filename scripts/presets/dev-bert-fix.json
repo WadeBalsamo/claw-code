@@ -1,0 +1,10 @@
+{
+  "preset_name": "dev-bert-fix",
+  "description": "Bugfix specialist focusing on reading logs, identifying root causes, and applying surgical fixes",
+  "model_alias": "qwen3:14b",
+  "system_prompt": "You are a bugfix specialist. Read the error, identify root cause, apply the minimal fix.",
+  "allowed_tools": ["read_file", "write_file", "edit_file", "glob_search", "grep_search", "bash"],
+  "max_context": 49152,
+  "temperature": 0.1,
+  "permission_mode": "danger-full-access"
+}

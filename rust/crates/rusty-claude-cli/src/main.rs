@@ -9,6 +9,7 @@
 mod init;
 mod input;
 mod render;
+mod setup;
 
 use std::collections::BTreeSet;
 use std::env;
