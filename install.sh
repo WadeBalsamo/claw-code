@@ -359,10 +359,22 @@ for entry in "${LAUNCHER_MAP[@]}"; do
     fi
 
     cp "${src}" "${dest}"
+    # Embed the repo root path into the launcher script by adding CLAW_CODE_ROOT export early
+    sed -i "6a export CLAW_CODE_ROOT=\"${SCRIPT_DIR}\"" "${dest}"
     chmod 755 "${dest}"
     ok "installed ${dest}"
     INSTALLED=$((INSTALLED + 1))
 done
+
+# Install direct 'claw' shortcut
+CLAW_DEST="${INSTALL_DIR}/claw"
+cat > "${CLAW_DEST}" <<EOF
+#!/usr/bin/env bash
+exec "${CLAW_BIN}" "\$@"
+EOF
+chmod 755 "${CLAW_DEST}"
+ok "installed ${CLAW_DEST}"
+INSTALLED=$((INSTALLED + 1))
 
 info "${INSTALLED} launchers installed to ${INSTALL_DIR}"
 
@@ -411,12 +423,12 @@ ${COLOR_GREEN}Claw Code is built and ready.${COLOR_RESET}
 
   Binary:   ${COLOR_BOLD}${CLAW_BIN}${COLOR_RESET}
   Profile:  ${BUILD_PROFILE}
-  Launchers: ${INSTALL_DIR}/{lmcode,ollamacode,opencode,run-claw-code}
+  Shortcuts: ${INSTALL_DIR}/{claw,lmcode,ollamacode,opencode,run-claw-code}
 
 Try it out:
 
-  ${COLOR_DIM}# interactive REPL${COLOR_RESET}
-  ${CLAW_BIN}
+  ${COLOR_DIM}# interactive REPL (from anywhere)${COLOR_RESET}
+  claw
 
   ${COLOR_DIM}# LM Studio${COLOR_RESET}
   lmcode
@@ -431,7 +443,7 @@ Try it out:
   run-claw-code --agent dev-frontend --dir /path/to/repo --plan "fix the bug"
 
   ${COLOR_DIM}# one-shot prompt${COLOR_RESET}
-  ${CLAW_BIN} prompt "summarize this repository"
+  claw prompt "summarize this repository"
 
 Authentication:
 
