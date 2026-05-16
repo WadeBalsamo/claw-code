@@ -238,7 +238,7 @@ if [ -z "$MODEL" ]; then
   echo "Enter/d=default b=browse c=custom q=quit" >&2
   read -rp "> " pick; pick="${pick:-d}"
   if [[ "$pick" =~ ^[1-9][0-9]*$ ]]; then
-    local idx=$((pick-1)); [ "$idx" -ge "${#RECENTS[@]}" ] && { echo "Invalid." >&2; exit 1; }
+    idx=$((pick-1)); [ "$idx" -ge "${#RECENTS[@]}" ] && { echo "Invalid." >&2; exit 1; }
     MODEL="${RECENTS[$idx]}"
   else
     case "$pick" in
