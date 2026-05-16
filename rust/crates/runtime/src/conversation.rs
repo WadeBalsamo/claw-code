@@ -258,7 +258,41 @@ impl ResilienceConfig {
         false
     }
 
-    /// Get the maximum retries for a specific error class
+    /// Get the maximum retries for a specific error class (provider-aware)
+    pub fn max_retries_for_provider(&self, error_class: &str, provider_name: &str) -> u32 {
+        if !self.should_enable_for_provider(provider_name) {
+            return 0;
+        }
+        match error_class {
+            "stream_empty" | "empty_stream" | "no_content" => self.stream_empty_max_retries,
+            "context_window" | "context_exceeded" => self.context_exceeded_max_retries,
+            "model_reloaded" => self.model_reloaded_max_retries,
+            "model_unloaded" | "local_model_unloaded" => self.model_unloaded_max_retries,
+            "decoding_error" | "decode" => self.decoding_error_max_retries,
+            "tool_sequence" => self.tool_sequence_error_max_retries,
+            "first_token_timeout" => self.model_reloaded_max_retries,
+            _ => 1,
+        }
+    }
+
+    /// Get the maximum retries for a specific error class (URL-aware)
+    pub fn max_retries_for_url(&self, error_class: &str, base_url: &str) -> u32 {
+        if !self.should_enable_for_url(base_url) {
+            return 0;
+        }
+        match error_class {
+            "stream_empty" | "empty_stream" | "no_content" => self.stream_empty_max_retries,
+            "context_window" | "context_exceeded" => self.context_exceeded_max_retries,
+            "model_reloaded" => self.model_reloaded_max_retries,
+            "model_unloaded" | "local_model_unloaded" => self.model_unloaded_max_retries,
+            "decoding_error" | "decode" => self.decoding_error_max_retries,
+            "tool_sequence" => self.tool_sequence_error_max_retries,
+            "first_token_timeout" => self.model_reloaded_max_retries,
+            _ => 1,
+        }
+    }
+
+    /// Get the maximum retries for a specific error class (default with is_enabled check)
     pub fn max_retries_for(&self, error_class: &str) -> u32 {
         if !self.is_enabled() {
             return 0;
@@ -604,6 +638,20 @@ where
         self
     }
 
+    /// Enable resilience for a specific provider type.
+    /// Useful for local models (lm_studio, local, etc.) or OpenAI-compatible endpoints.
+    #[must_use]
+    pub fn with_provider_resilience(mut self, provider_name: &str) -> Self {
+        self.resilience_config = match provider_name.to_lowercase().as_str() {
+            "anthropic" => self.resilience_config.with_anthropic_enabled(true),
+            "openai" | "xai" | "dashscope" | "lm_studio" | "local" => {
+                self.resilience_config.with_openai_compat_enabled(true)
+            }
+            _ => self.resilience_config,
+        };
+        self
+    }
+
     fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
         if let Some(reporter) = self.hook_progress_reporter.as_mut() {
             self.hook_runner.run_pre_tool_use_with_context(
@@ -786,7 +834,8 @@ where
                     Ok(result) => break result,
                     Err(error) => {
                         let error_class = ErrorClass::classify(&error);
-                        let max_retries = self.resilience_config.max_retries_for(error_class.as_str());
+                        let max_retries =
+                            self.resilience_config.max_retries_for(error_class.as_str());
                         if build_attempt > max_retries {
                             self.record_turn_failed(iterations, &error);
                             return Err(error);

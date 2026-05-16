@@ -481,10 +481,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Launch REPL with the resolved model
                     if let Some(model) = result.model {
-                        run_repl(model, None, PermissionMode::DangerFullAccess, None, None, false)?;
+                        run_repl(
+                            model,
+                            None,
+                            PermissionMode::DangerFullAccess,
+                            None,
+                            None,
+                            false,
+                        )?;
                     }
                 }
-                setup::SetupAction::ListModelsOnly | setup::SetupAction::SetKey | setup::SetupAction::PrintVersion => {
+                setup::SetupAction::ListModelsOnly
+                | setup::SetupAction::SetKey
+                | setup::SetupAction::PrintVersion => {
                     // Already handled by setup
                 }
             }
@@ -1232,20 +1241,18 @@ use setup::SetupTarget;
 fn parse_setup_args(args: &[String], output_format: CliOutputFormat) -> Result<CliAction, String> {
     let (target, model) = match args.first().map(String::as_str) {
         None | Some("help") => {
-            return Err(String::from(
-                concat!(
-                    "claw setup [ollama|lmstudio|openrouter|models] [model]
-", 
-                    "  Ollama:        claw setup ollama [model]
-", 
-                    "  LM Studio:     claw setup lmstudio [model]
-", 
-                    "  OpenRouter:    claw setup openrouter [--list-models] [--set-key <key>] [model]
-", 
-                    "  Unified:       claw setup models
+            return Err(String::from(concat!(
+                "claw setup [ollama|lmstudio|openrouter|models] [model]
+",
+                "  Ollama:        claw setup ollama [model]
+",
+                "  LM Studio:     claw setup lmstudio [model]
+",
+                "  OpenRouter:    claw setup openrouter [--list-models] [--set-key <key>] [model]
+",
+                "  Unified:       claw setup models
 "
-                )
-            ));
+            )));
         }
         Some("ollama") => {
             let model = args.get(1).cloned();
@@ -1274,7 +1281,13 @@ fn parse_setup_args(args: &[String], output_format: CliOutputFormat) -> Result<C
                 }
                 i += 1;
             }
-            (SetupTarget::OpenRouter { set_key, list_models }, model_hint)
+            (
+                SetupTarget::OpenRouter {
+                    set_key,
+                    list_models,
+                },
+                model_hint,
+            )
         }
         Some("models") => {
             if args.len() > 1 {
@@ -1283,7 +1296,9 @@ fn parse_setup_args(args: &[String], output_format: CliOutputFormat) -> Result<C
             (SetupTarget::Models, None)
         }
         Some(other) => {
-            return Err(format!("unknown setup target: {other}. Use ollama, lmstudio, openrouter, or models."));
+            return Err(format!(
+                "unknown setup target: {other}. Use ollama, lmstudio, openrouter, or models."
+            ));
         }
     };
     Ok(CliAction::Setup {
