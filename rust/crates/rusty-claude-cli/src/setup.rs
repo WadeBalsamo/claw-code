@@ -103,8 +103,8 @@ fn default_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
-fn set_env(map: &mut HashMap<String, String>, key: &str, value: String) {
-    map.insert(key.to_string(), value);
+fn set_env(map: &mut HashMap<String, String>, key: &str, value: impl Into<String>) {
+    map.insert(key.to_string(), value.into());
 }
 
 // ── TUI model selector (crossterm arrow-key) ──────────────────────────
@@ -182,7 +182,8 @@ impl TuiPicker {
                     scroll_offset = scroll_offset.saturating_sub(max_visible);
                 }
                 TuiKey::PageDown => {
-                    let new_scroll = (scroll_offset + max_visible).min(models.len().saturating_sub(1));
+                    let new_scroll =
+                        (scroll_offset + max_visible).min(models.len().saturating_sub(1));
                     scroll_offset = new_scroll;
                     selected = new_scroll.min(selected + max_visible);
                 }
@@ -209,7 +210,13 @@ impl TuiPicker {
         }
     }
 
-    fn draw_models(models: &[ModelEntry], title: &str, selected: usize, scroll: usize, max_visible: usize) {
+    fn draw_models(
+        models: &[ModelEntry],
+        title: &str,
+        selected: usize,
+        scroll: usize,
+        max_visible: usize,
+    ) {
         let mut out = io::stdout();
         let _ = execute!(out, cursor::MoveTo(0, 0), Clear(ClearType::All));
 
@@ -225,23 +232,32 @@ impl TuiPicker {
         let _ = execute!(
             out,
             SetForegroundColor(Color::DarkGrey),
-            style::Print(format!(" {:>3}  {:<45} {:<18} {:>8}  {}",
-                "#", "Model", "Provider", "Ctx", "Notes")),
+            style::Print(format!(
+                " {:>3}  {:<45} {:<18} {:>8}  {}",
+                "#", "Model", "Provider", "Ctx", "Notes"
+            )),
             ResetColor,
             style::Print("\n")
         );
         let _ = execute!(
             out,
             SetForegroundColor(Color::DarkGrey),
-            style::Print(format!(" {:-<3}  {:-<45} {:-<18} {:-<8}  {:-<20}\n", "", "", "", "", "")),
+            style::Print(format!(
+                " {:-<3}  {:-<45} {:-<18} {:-<8}  {:-<20}\n",
+                "", "", "", "", ""
+            )),
             ResetColor
         );
 
         let end = (scroll + max_visible).min(models.len());
         for i in scroll..end {
             let m = &models[i];
-            let ctx_str = m.context.map(|c| format_ctx(c)).unwrap_or_else(|| "?".to_string());
-            let line = format!(" {:>3}  {:<45} {:<18} {:>8}  {}",
+            let ctx_str = m
+                .context
+                .map(|c| format_ctx(c))
+                .unwrap_or_else(|| "?".to_string());
+            let line = format!(
+                " {:>3}  {:<45} {:<18} {:>8}  {}",
                 i + 1,
                 m.id,
                 m.provider,
@@ -272,8 +288,11 @@ impl TuiPicker {
         let _ = execute!(
             out,
             SetForegroundColor(Color::DarkGrey),
-            style::Print(format!(" {}/{} — ↑↓ pgup/pgdn home/end enter q\n",
-                selected + 1, models.len())),
+            style::Print(format!(
+                " {}/{} — ↑↓ pgup/pgdn home/end enter q\n",
+                selected + 1,
+                models.len()
+            )),
             ResetColor
         );
         let _ = out.flush();
@@ -310,7 +329,13 @@ impl TuiPicker {
         eprintln!("\n── {} ──", title);
         for (i, m) in models.iter().enumerate() {
             let ctx_str = m.context.map(format_ctx).unwrap_or_else(|| "?".to_string());
-            eprintln!("  {:>3}. {:<50}  {}  ctx={}", i + 1, m.id, m.provider, ctx_str);
+            eprintln!(
+                "  {:>3}. {:<50}  {}  ctx={}",
+                i + 1,
+                m.id,
+                m.provider,
+                ctx_str
+            );
         }
         eprint!("Select model (1-{}, q=quit): ", models.len());
         let _ = io::stderr().flush();
@@ -465,8 +490,16 @@ fn setup_ollama(model_hint: Option<String>) -> Result<SetupResult, Box<dyn std::
     };
 
     let mut env_map = HashMap::new();
-    set_env(&mut env_map, "OPENAI_BASE_URL", format!("{}/v1", ollama_base_url()));
-    set_env(&mut env_map, "OPENAI_API_KEY", env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string()));
+    set_env(
+        &mut env_map,
+        "OPENAI_BASE_URL",
+        format!("{}/v1", ollama_base_url()),
+    );
+    set_env(
+        &mut env_map,
+        "OPENAI_API_KEY",
+        env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string()),
+    );
     set_env(&mut env_map, "CLAW_RESILIENCE", "force".to_string());
 
     eprintln!("\n  ✓ Launching with model: {model}");
@@ -540,8 +573,8 @@ async fn probe_lmstudio(host_port: &str) -> bool {
 }
 
 async fn discover_lmstudio_address() -> Result<String, String> {
-    let configured_host = env::var("LM_STUDIO_HOST")
-        .unwrap_or_else(|_| LMSTUDIO_DEFAULT_HOST.to_string());
+    let configured_host =
+        env::var("LM_STUDIO_HOST").unwrap_or_else(|_| LMSTUDIO_DEFAULT_HOST.to_string());
     let configured_port: u16 = env::var("LM_STUDIO_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -585,7 +618,10 @@ async fn fetch_lmstudio_models(host_port: &str) -> Result<Vec<ModelEntry>, Strin
         .map_err(|e| format!("failed to fetch model list: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("LM Studio model list returned HTTP {}", resp.status()));
+        return Err(format!(
+            "LM Studio model list returned HTTP {}",
+            resp.status()
+        ));
     }
 
     let data: serde_json::Value = resp
@@ -632,8 +668,16 @@ fn setup_lmstudio(model_hint: Option<String>) -> Result<SetupResult, Box<dyn std
     let (host, port) = address.split_once(':').unwrap_or((&address, "1234"));
 
     let mut env_map = HashMap::new();
-    set_env(&mut env_map, "OPENAI_BASE_URL", format!("http://{host}:{port}/v1"));
-    set_env(&mut env_map, "OPENAI_API_KEY", env::var("OPENAI_API_KEY").unwrap_or_else(|_| "local-model".to_string()));
+    set_env(
+        &mut env_map,
+        "OPENAI_BASE_URL",
+        format!("http://{host}:{port}/v1"),
+    );
+    set_env(
+        &mut env_map,
+        "OPENAI_API_KEY",
+        env::var("OPENAI_API_KEY").unwrap_or_else(|_| "local-model".to_string()),
+    );
     set_env(&mut env_map, "CLAW_RESILIENCE", "force".to_string());
 
     eprintln!("\n  ✓ Launching with model: {model}");
@@ -682,8 +726,8 @@ fn load_openrouter_api_key() -> Result<String, String> {
     }
     let env_path = openrouter_env_path();
     if env_path.exists() {
-        let content =
-            fs::read_to_string(&env_path).map_err(|e| format!("failed to read {path}: {e}", path = env_path.display()))?;
+        let content = fs::read_to_string(&env_path)
+            .map_err(|e| format!("failed to read {path}: {e}", path = env_path.display()))?;
         for line in content.lines() {
             if let Some(value) = line.strip_prefix("OPENROUTER_API_KEY=") {
                 let trimmed = value.trim();
@@ -722,7 +766,9 @@ async fn fetch_openrouter_models(api_key: &str) -> Result<Vec<OpenRouterModel>, 
 
     if !resp.status().is_success() {
         if resp.status().as_u16() == 401 {
-            return Err("Invalid or expired OpenRouter API key – check OPENROUTER_API_KEY".to_string());
+            return Err(
+                "Invalid or expired OpenRouter API key – check OPENROUTER_API_KEY".to_string(),
+            );
         }
         return Err(format!("OpenRouter API returned HTTP {}", resp.status()));
     }
@@ -758,8 +804,9 @@ fn setup_openrouter(
     model_hint: Option<String>,
     list_only: bool,
 ) -> Result<SetupResult, Box<dyn std::error::Error>> {
-    let api_key = load_openrouter_api_key()
-        .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error>)?;
+    let api_key = load_openrouter_api_key().map_err(|e| {
+        Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error>
+    })?;
 
     if list_only {
         let runtime = tokio::runtime::Runtime::new()?;
@@ -812,9 +859,17 @@ fn setup_openrouter(
     };
 
     let mut env_map = HashMap::new();
-    set_env(&mut env_map, "OPENAI_BASE_URL", "https://openrouter.ai/api/v1".to_string());
+    set_env(
+        &mut env_map,
+        "OPENAI_BASE_URL",
+        "https://openrouter.ai/api/v1".to_string(),
+    );
     set_env(&mut env_map, "OPENAI_API_KEY", api_key.clone());
-    set_env(&mut env_map, "HTTP_REFERER", "https://localhost".to_string());
+    set_env(
+        &mut env_map,
+        "HTTP_REFERER",
+        "https://localhost".to_string(),
+    );
     set_env(&mut env_map, "X_TITLE", "claw-code".to_string());
     set_env(&mut env_map, "CLAW_RESILIENCE", "none".to_string());
 
@@ -871,11 +926,9 @@ fn unified_model_browser() -> Result<SetupResult, Box<dyn std::error::Error>> {
     }
 
     if all_models.is_empty() {
-        return Err(
-            "No models found from any provider.\n\
+        return Err("No models found from any provider.\n\
              Make sure Ollama or LM Studio is running, or set a recent API model."
-                .into(),
-        );
+            .into());
     }
 
     let model = match TuiPicker::pick(&all_models, "All available models") {
@@ -884,12 +937,13 @@ fn unified_model_browser() -> Result<SetupResult, Box<dyn std::error::Error>> {
     };
 
     // Determine which provider the selected model belongs to, to set correct env vars
-    let (base_url, api_key, resilience, provider_name) = resolve_model_provider(&model, &all_models);
+    let (base_url, api_key, resilience, provider_name) =
+        resolve_model_provider(&model, &all_models);
 
     let mut env_map = HashMap::new();
     set_env(&mut env_map, "OPENAI_BASE_URL", base_url);
     set_env(&mut env_map, "OPENAI_API_KEY", api_key);
-    set_env(&mut env_map, "CLAW_RESILIENCE", resilience);
+    set_env(&mut env_map, "CLAW_RESILIENCE", resilience.clone());
 
     // Save to recent API models
     save_recent_api_model(&model);
@@ -906,7 +960,10 @@ fn unified_model_browser() -> Result<SetupResult, Box<dyn std::error::Error>> {
 }
 
 /// Resolve the correct env vars for a model selected from the unified browser.
-fn resolve_model_provider(model: &str, all_models: &[ModelEntry]) -> (String, String, String, String) {
+fn resolve_model_provider(
+    model: &str,
+    all_models: &[ModelEntry],
+) -> (String, String, String, String) {
     // Find which provider entry has this model
     let entry = all_models.iter().find(|m| m.id == model);
     let provider = entry.map(|m| m.provider.as_str()).unwrap_or("auto");
@@ -914,41 +971,54 @@ fn resolve_model_provider(model: &str, all_models: &[ModelEntry]) -> (String, St
     match provider {
         "Ollama" => {
             let base = ollama_base_url();
-            (format!("{base}/v1"),
-             env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string()),
-             "force".to_string(),
-             "Ollama".to_string())
+            (
+                format!("{base}/v1"),
+                env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string()),
+                "force".to_string(),
+                "Ollama".to_string(),
+            )
         }
         "LM Studio" => {
             // Try to find the address from recent file
-            let addr = load_lmstudio_recent().first().cloned()
+            let addr = load_lmstudio_recent()
+                .first()
+                .cloned()
                 .unwrap_or_else(|| format!("{LMSTUDIO_DEFAULT_HOST}:{LMSTUDIO_DEFAULT_PORT}"));
-            (format!("http://{addr}/v1"),
-             env::var("OPENAI_API_KEY").unwrap_or_else(|_| "local-model".to_string()),
-             "force".to_string(),
-             "LM Studio".to_string())
+            (
+                format!("http://{addr}/v1"),
+                env::var("OPENAI_API_KEY").unwrap_or_else(|_| "local-model".to_string()),
+                "force".to_string(),
+                "LM Studio".to_string(),
+            )
         }
         "OpenRouter" => {
-            let key = load_openrouter_api_key().unwrap_or_else(|_| env::var("OPENAI_API_KEY").unwrap_or_default());
-            ("https://openrouter.ai/api/v1".to_string(),
-             key,
-             "none".to_string(),
-             "OpenRouter".to_string())
+            let key = load_openrouter_api_key()
+                .unwrap_or_else(|_| env::var("OPENAI_API_KEY").unwrap_or_default());
+            (
+                "https://openrouter.ai/api/v1".to_string(),
+                key,
+                "none".to_string(),
+                "OpenRouter".to_string(),
+            )
         }
         _ => {
             // Auto-detect from env vars
             if env::var("OPENAI_BASE_URL").is_ok() {
-                (env::var("OPENAI_BASE_URL").unwrap(),
-                 env::var("OPENAI_API_KEY").unwrap_or_default(),
-                 env::var("CLAW_RESILIENCE").unwrap_or_else(|_| "auto".to_string()),
-                 "custom".to_string())
+                (
+                    env::var("OPENAI_BASE_URL").unwrap(),
+                    env::var("OPENAI_API_KEY").unwrap_or_default(),
+                    env::var("CLAW_RESILIENCE").unwrap_or_else(|_| "auto".to_string()),
+                    "custom".to_string(),
+                )
             } else {
                 // Default to Ollama-like
                 let base = ollama_base_url();
-                (format!("{base}/v1"),
-                 env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string()),
-                 "force".to_string(),
-                 "auto (Ollama)".to_string())
+                (
+                    format!("{base}/v1"),
+                    env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string()),
+                    "force".to_string(),
+                    "auto (Ollama)".to_string(),
+                )
             }
         }
     }
@@ -1044,8 +1114,14 @@ mod tests {
         assert_eq!(SetupTarget::LmStudio, SetupTarget::LmStudio);
         assert_eq!(SetupTarget::Models, SetupTarget::Models);
         assert_eq!(
-            SetupTarget::OpenRouter { set_key: None, list_models: false },
-            SetupTarget::OpenRouter { set_key: None, list_models: false }
+            SetupTarget::OpenRouter {
+                set_key: None,
+                list_models: false
+            },
+            SetupTarget::OpenRouter {
+                set_key: None,
+                list_models: false
+            }
         );
     }
 
@@ -1053,7 +1129,10 @@ mod tests {
     fn resolve_model_provider_defaults_to_ollama() {
         let all_models: Vec<ModelEntry> = vec![];
         let (url, _, resilience, name) = resolve_model_provider("unknown-model", &all_models);
-        assert!(url.contains("11434"), "should default to Ollama port: {url}");
+        assert!(
+            url.contains("11434"),
+            "should default to Ollama port: {url}"
+        );
         assert_eq!(resilience, "force");
         assert!(name.contains("Ollama") || name.contains("auto"));
     }

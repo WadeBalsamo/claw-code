@@ -16,6 +16,7 @@ compat-harness = { path = "../compat-harness" }
 crossterm = "0.28"
 atty = "0.2"
 pulldown-cmark = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustyline = "15"
 runtime = { path = "../runtime" }
 plugins = { path = "../plugins" }

@@ -1477,6 +1477,7 @@ dependencies = [
  "mock-anthropic-service",
  "plugins",
  "pulldown-cmark",
+ "reqwest",
  "runtime",
  "rustyline",
  "serde",

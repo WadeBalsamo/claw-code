@@ -194,7 +194,8 @@ impl ApiError {
             | Self::RequestBodySizeExceeded { .. }
             | Self::LocalModelUnloaded { .. }
             | Self::EmptyAssistantStream { .. }
-            | Self::FirstTokenTimeout { .. } => None,
+            | Self::FirstTokenTimeout { .. }
+            | Self::StreamDebugInfo { .. } => None,
         }
     }
 
@@ -223,6 +224,8 @@ impl ApiError {
             Self::LocalModelUnloaded { .. }
             | Self::EmptyAssistantStream { .. }
             | Self::FirstTokenTimeout { .. } => "local_model_recovery",
+            Self::ToolSequenceError { .. } => "provider_error",
+            Self::StreamDebugInfo { .. } => "provider_transport",
         }
     }
 
@@ -249,7 +252,9 @@ impl ApiError {
             | Self::RequestBodySizeExceeded { .. }
             | Self::LocalModelUnloaded { .. }
             | Self::EmptyAssistantStream { .. }
-            | Self::FirstTokenTimeout { .. } => false,
+            | Self::FirstTokenTimeout { .. }
+            | Self::ToolSequenceError { .. }
+            | Self::StreamDebugInfo { .. } => false,
         }
     }
 
@@ -282,7 +287,9 @@ impl ApiError {
             | Self::RequestBodySizeExceeded { .. }
             | Self::LocalModelUnloaded { .. }
             | Self::EmptyAssistantStream { .. }
-            | Self::FirstTokenTimeout { .. } => false,
+            | Self::FirstTokenTimeout { .. }
+            | Self::ToolSequenceError { .. }
+            | Self::StreamDebugInfo { .. } => false,
         }
     }
 }
@@ -416,6 +423,27 @@ impl Display for ApiError {
                 f,
                 "first token timeout for {model} ({provider}) after {timeout_ms}ms; Claw will retry with extended timeout"
             ),
+            Self::ToolSequenceError { request_id, body } => {
+                write!(f, "tool sequence error")?;
+                if let Some(request_id) = request_id {
+                    write!(f, " [trace {request_id}]")?;
+                }
+                write!(f, ": {body}")
+            }
+            Self::StreamDebugInfo {
+                message,
+                tokens_produced,
+                stream_events,
+            } => {
+                write!(f, "stream debug info: {message}")?;
+                if let Some(tokens) = tokens_produced {
+                    write!(f, " (tokens produced: {tokens})")?;
+                }
+                if !stream_events.is_empty() {
+                    write!(f, " (events: {})", stream_events.join(", "))?;
+                }
+                Ok(())
+            }
         }
     }
 }
