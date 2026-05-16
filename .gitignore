@@ -18,7 +18,7 @@ Cargo.lock
 .claude/settings.local.json
 .claude/sessions/
 .claude/
-
+plans/
 # Claw Code local artifacts
 .claw/settings.local.json
 .claw/sessions/
@@ -38,3 +38,8 @@ rust/.claude/
 
 # GitHub related files
 .github/
+.gitignore
+conflicts.md
+plan.md
+claude.json
+clawd-todos.json

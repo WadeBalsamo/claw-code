@@ -56,7 +56,8 @@ mod resilience_config_tests {
             requested_output_tokens: 4096,
             estimated_total_tokens: 154_096,
             context_window_tokens: 200_000,
-        }.is_context_window_failure());
+        }
+        .is_context_window_failure());
     }
 
     #[test]
@@ -80,12 +81,7 @@ mod resilience_config_tests {
         let source = serde_json::from_str::<serde_json::Value>("{not json")
             .expect_err("invalid json should fail to parse");
 
-        let error = ApiError::json_deserialize(
-            "Anthropic",
-            "claude-opus-4-6",
-            &raw_body,
-            source,
-        );
+        let error = ApiError::json_deserialize("Anthropic", "claude-opus-4-6", &raw_body, source);
 
         // When checking if we need payload size guarding
         // Then the error handler should detect oversized payloads
@@ -189,7 +185,11 @@ mod error_classification_tests {
             let is_context_failure = error.is_context_window_failure();
 
             // Then it should be detected as a context failure
-            assert!(is_context_failure, "Should detect context failure for: {}", message);
+            assert!(
+                is_context_failure,
+                "Should detect context failure for: {}",
+                message
+            );
         }
     }
 

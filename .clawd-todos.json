@@ -1,22 +1,37 @@
 [
   {
-    "content": "Build the run-claw-code bash entry point script",
-    "activeForm": "Building run-claw-code entry point",
+    "content": "Audit current setup scripts and configuration system",
+    "activeForm": "Auditing current setup scripts and configuration",
+    "status": "completed"
+  },
+  {
+    "content": "Wire setup command into main.rs with CliAction::Setup",
+    "activeForm": "Wiring setup command into main.rs CLI",
     "status": "in_progress"
   },
   {
-    "content": "Build the claw-scheduler daemon for resource management",
-    "activeForm": "Building claw-scheduler daemon",
+    "content": "Add TUI model selector (crossterm arrow-key) for LM Studio",
+    "activeForm": "Adding TUI model selector to setup.rs",
     "status": "pending"
   },
   {
-    "content": "Create install rules and systemd integration",
-    "activeForm": "Creating install integration",
+    "content": "Add Ollama support to setup.rs with TUI model selector",
+    "activeForm": "Adding Ollama support to setup.rs",
     "status": "pending"
   },
   {
-    "content": "Test the complete run-claw-code flow",
-    "activeForm": "Testing the full flow",
+    "content": "Add unified model browser across all local providers + recently used API models",
+    "activeForm": "Adding unified model browser",
+    "status": "pending"
+  },
+  {
+    "content": "Make setup return env vars + model, dispatch to REPL launch",
+    "activeForm": "Making setup actually launch REPL",
+    "status": "pending"
+  },
+  {
+    "content": "Build and test everything compiles",
+    "activeForm": "Building and testing",
     "status": "pending"
   }
 ]

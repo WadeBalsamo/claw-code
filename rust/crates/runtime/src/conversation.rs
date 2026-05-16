@@ -232,9 +232,7 @@ impl ResilienceConfig {
         }
         match provider_name.to_lowercase().as_str() {
             "anthropic" => self.enable_for_anthropic,
-            "openai" | "xai" | "dashscope" | "lm_studio" | "local" => {
-                self.enable_for_openai_compat
-            }
+            "openai" | "xai" | "dashscope" | "lm_studio" | "local" => self.enable_for_openai_compat,
             _ => false,
         }
     }
@@ -249,9 +247,7 @@ impl ResilienceConfig {
         }
         if self.auto_enable_for_local {
             let lower = base_url.to_lowercase();
-            if lower.contains("localhost")
-                || lower.contains("127.0.0.1")
-                || lower.contains("local")
+            if lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("local")
             {
                 return true;
             }
@@ -1116,7 +1112,6 @@ where
         &mut self,
         request: ApiRequest,
     ) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        let mut last_error = None;
         let mut attempt: u32 = 0;
 
         loop {
@@ -1136,8 +1131,8 @@ where
 
                     // Log the error for debugging
                     eprintln!(
-                        "stream_with_resilience: attempt {attempt}, error_class={:?}, max_retries={max_retries}, consecutive_failures={}",
-                        error_class, max_retries, self.consecutive_stream_failures
+                        "stream_with_resilience: attempt {}, error_class={:?}, max_retries={}, consecutive_failures={}",
+                        attempt, error_class, max_retries, self.consecutive_stream_failures
                     );
 
                     // If no retries left, return the error
@@ -1206,8 +1201,6 @@ where
                     if backoff > Duration::from_secs(0) {
                         std::thread::sleep(backoff);
                     }
-
-                    last_error = Some(error);
                 }
             }
         }

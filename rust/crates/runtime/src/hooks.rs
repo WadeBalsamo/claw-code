@@ -388,10 +388,7 @@ impl HookRunner {
 
     /// Set stream debugging hooks for monitoring stream lifecycle events.
     #[must_use]
-    pub fn with_stream_debug_hooks(
-        mut self,
-        hooks: Vec<Box<dyn HookStreamDebugger>>,
-    ) -> Self {
+    pub fn with_stream_debug_hooks(mut self, hooks: Vec<Box<dyn HookStreamDebugger>>) -> Self {
         self.stream_debug_hooks = hooks;
         self
     }
@@ -1434,12 +1431,8 @@ mod tests {
         use super::StreamDebugExecutor;
 
         let executor = StreamDebugExecutor::new();
-        let runner = HookRunner::new(RuntimeHookConfig::new(
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ))
-        .with_stream_debug_hooks(vec![Box::new(executor)]);
+        let runner = HookRunner::new(RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new()))
+            .with_stream_debug_hooks(vec![Box::new(executor)]);
 
         // Verify the runner was constructed successfully with stream debug hooks
         let result = runner.run_pre_tool_use("Read", r#"{"path":"README.md"}"#);

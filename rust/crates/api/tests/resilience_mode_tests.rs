@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use api::{resilience_config::ResilienceConfig, error::ApiError};
+use api::{error::ApiError, resilience_config::ResilienceConfig};
 use reqwest::StatusCode;
 
 /// Comprehensive test suite for resilience mode functionality
@@ -16,7 +16,7 @@ mod resilience_mode_tests {
     #[test]
     fn resilience_config_default_values() {
         let config = ResilienceConfig::default();
-        
+
         // Error-specific retry configurations
         assert_eq!(config.model_reloaded_max_retries, 3);
         assert_eq!(config.context_exceeded_max_retries, 2);
@@ -24,19 +24,34 @@ mod resilience_mode_tests {
         assert_eq!(config.decoding_error_max_retries, 2);
         assert_eq!(config.model_unloaded_max_retries, 5);
         assert_eq!(config.tool_sequence_error_max_retries, 2);
-        
+
         // Backoff configurations
-        assert_eq!(config.model_reloaded_initial_backoff, Duration::from_secs(1));
-        assert_eq!(config.context_exceeded_initial_backoff, Duration::from_secs(2));
+        assert_eq!(
+            config.model_reloaded_initial_backoff,
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            config.context_exceeded_initial_backoff,
+            Duration::from_secs(2)
+        );
         assert_eq!(config.stream_empty_initial_backoff, Duration::from_secs(1));
-        assert_eq!(config.decoding_error_initial_backoff, Duration::from_secs(1));
-        assert_eq!(config.model_unloaded_initial_backoff, Duration::from_secs(3));
-        assert_eq!(config.tool_sequence_error_initial_backoff, Duration::from_secs(1));
-        
+        assert_eq!(
+            config.decoding_error_initial_backoff,
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            config.model_unloaded_initial_backoff,
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            config.tool_sequence_error_initial_backoff,
+            Duration::from_secs(1)
+        );
+
         // Context management thresholds
         assert_eq!(config.context_warning_threshold, 0.8);
         assert_eq!(config.context_critical_threshold, 0.95);
-        
+
         // Compaction strategies
         assert_eq!(config.aggressive_compaction_preserve_recent, 1);
         assert_eq!(config.conservative_compaction_preserve_recent, 3);
@@ -45,7 +60,7 @@ mod resilience_mode_tests {
     #[test]
     fn resilience_config_force_enable_values() {
         let config = ResilienceConfig::force_enable();
-        
+
         // Force enable should have higher retry counts
         assert_eq!(config.model_reloaded_max_retries, 5);
         assert_eq!(config.context_exceeded_max_retries, 3);
@@ -53,7 +68,7 @@ mod resilience_mode_tests {
         assert_eq!(config.decoding_error_max_retries, 3);
         assert_eq!(config.model_unloaded_max_retries, 10);
         assert_eq!(config.tool_sequence_error_max_retries, 3);
-        
+
         // Force enable flags
         assert!(config.force_enable);
         assert!(!config.force_disable);
@@ -64,7 +79,7 @@ mod resilience_mode_tests {
     #[test]
     fn resilience_config_force_disable_values() {
         let config = ResilienceConfig::force_disable();
-        
+
         // Force disable should have zero retries
         assert_eq!(config.model_reloaded_max_retries, 0);
         assert_eq!(config.context_exceeded_max_retries, 0);
@@ -72,7 +87,7 @@ mod resilience_mode_tests {
         assert_eq!(config.decoding_error_max_retries, 0);
         assert_eq!(config.model_unloaded_max_retries, 0);
         assert_eq!(config.tool_sequence_error_max_retries, 0);
-        
+
         // Force disable flags
         assert!(!config.force_enable);
         assert!(config.force_disable);
@@ -83,24 +98,24 @@ mod resilience_mode_tests {
     #[test]
     fn resilience_config_should_enable_for_provider() {
         let config = ResilienceConfig::default();
-        
+
         // Anthropic disabled by default
         assert!(!config.should_enable_for_provider("anthropic"));
-        
+
         // OpenAI compatible enabled by default
         assert!(config.should_enable_for_provider("openai"));
         assert!(config.should_enable_for_provider("xai"));
         assert!(config.should_enable_for_provider("dashscope"));
         assert!(config.should_enable_for_provider("lm_studio"));
-        
+
         // Unknown provider
         assert!(!config.should_enable_for_provider("unknown"));
-        
+
         // With force enable
         let forced_config = ResilienceConfig::force_enable();
         assert!(forced_config.should_enable_for_provider("anthropic"));
         assert!(forced_config.should_enable_for_provider("unknown"));
-        
+
         // With force disable
         let disabled_config = ResilienceConfig::force_disable();
         assert!(!disabled_config.should_enable_for_provider("anthropic"));
@@ -110,20 +125,20 @@ mod resilience_mode_tests {
     #[test]
     fn resilience_config_should_enable_for_url() {
         let config = ResilienceConfig::default();
-        
+
         // Localhost should be enabled
         assert!(config.should_enable_for_url("http://localhost:8000"));
         assert!(config.should_enable_for_url("http://127.0.0.1:8000"));
         assert!(config.should_enable_for_url("http://local-llama:8000"));
-        
+
         // Remote should be disabled
         assert!(!config.should_enable_for_url("https://api.openai.com"));
         assert!(!config.should_enable_for_url("https://api.anthropic.com"));
-        
+
         // With force enable
         let forced_config = ResilienceConfig::force_enable();
         assert!(forced_config.should_enable_for_url("https://api.openai.com"));
-        
+
         // With force disable
         let disabled_config = ResilienceConfig::force_disable();
         assert!(!disabled_config.should_enable_for_url("http://localhost:8000"));
@@ -134,16 +149,16 @@ mod resilience_mode_tests {
         // Test validation passes for valid configs
         let config = ResilienceConfig::default();
         assert!(config.validate().is_ok());
-        
+
         // Test validation fails for invalid retry counts
         let mut invalid_config = ResilienceConfig::default();
         invalid_config.model_reloaded_max_retries = 15; // Too high
         assert!(invalid_config.validate().is_err());
-        
+
         let mut invalid_config2 = ResilienceConfig::default();
         invalid_config2.context_exceeded_max_retries = 15; // Too high
         assert!(invalid_config2.validate().is_err());
-        
+
         // Test validation passes for boundary values
         let mut boundary_config = ResilienceConfig::default();
         boundary_config.model_reloaded_max_retries = 10; // Boundary
@@ -160,7 +175,7 @@ mod resilience_mode_tests {
             request_id: Some("req-123".to_string()),
             body: "tool_use blocks must be immediately followed by tool_result blocks".to_string(),
         };
-        
+
         assert!(error.is_retryable());
     }
 
@@ -171,7 +186,7 @@ mod resilience_mode_tests {
             tokens_produced: Some(100),
             stream_events: vec!["event1".to_string(), "event2".to_string()],
         };
-        
+
         assert!(!error.is_retryable());
     }
 
@@ -181,9 +196,10 @@ mod resilience_mode_tests {
             request_id: Some("req-123".to_string()),
             body: "tool_use blocks must be immediately followed by tool_result blocks".to_string(),
         };
-        
+
         let error_string = error.to_string();
-        assert!(error_string.contains("tool_use blocks must be immediately followed by tool_result blocks"));
+        assert!(error_string
+            .contains("tool_use blocks must be immediately followed by tool_result blocks"));
         assert!(error_string.contains("[trace req-123]"));
     }
 
@@ -194,7 +210,7 @@ mod resilience_mode_tests {
             tokens_produced: Some(100),
             stream_events: vec!["event1".to_string(), "event2".to_string()],
         };
-        
+
         let error_string = error.to_string();
         assert!(error_string.contains("assistant stream produced no content"));
         assert!(error_string.contains("tokens_produced: Some(100)"));
@@ -243,8 +259,11 @@ mod resilience_mode_tests {
             };
 
             // Should be detected as context window failure
-            assert!(error.is_context_window_failure(), 
-                "Should detect context failure for: {}", message);
+            assert!(
+                error.is_context_window_failure(),
+                "Should detect context failure for: {}",
+                message
+            );
         }
     }
 
@@ -327,7 +346,8 @@ mod resilience_mode_tests {
             },
             ApiError::ToolSequenceError {
                 request_id: Some("req-123".to_string()),
-                body: "tool_use blocks must be immediately followed by tool_result blocks".to_string(),
+                body: "tool_use blocks must be immediately followed by tool_result blocks"
+                    .to_string(),
             },
             ApiError::EmptyAssistantStream {
                 provider: "Anthropic".to_string(),
@@ -363,7 +383,10 @@ mod resilience_mode_tests {
             ApiError::ExpiredOAuthToken,
             ApiError::Auth("Invalid credentials".to_string()),
             ApiError::InvalidApiKeyEnv(std::env::VarError::NotPresent),
-            ApiError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")),
+            ApiError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "file not found",
+            )),
             ApiError::Json {
                 provider: "Anthropic".to_string(),
                 model: "claude-opus-4-6".to_string(),
@@ -384,14 +407,12 @@ mod resilience_mode_tests {
 
         // Check retryable errors
         for error in retryable_errors {
-            assert!(error.is_retryable(), 
-                "{:?} should be retryable", error);
+            assert!(error.is_retryable(), "{:?} should be retryable", error);
         }
 
         // Check non-retryable errors
         for error in non_retryable_errors {
-            assert!(!error.is_retryable(), 
-                "{:?} should not be retryable", error);
+            assert!(!error.is_retryable(), "{:?} should not be retryable", error);
         }
     }
 

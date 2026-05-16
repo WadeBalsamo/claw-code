@@ -467,6 +467,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
+        CliAction::Setup {
+            target,
+            model,
+            output_format: _,
+        } => {
+            let result = setup::handle_setup(target, model)?;
+            match result.action {
+                setup::SetupAction::LaunchRepl => {
+                    // Apply env vars
+                    for (k, v) in &result.env {
+                        env::set_var(k, v);
+                    }
+                    // Launch REPL with the resolved model
+                    if let Some(model) = result.model {
+                        run_repl(model, None, PermissionMode::DangerFullAccess, None, None, false)?;
+                    }
+                }
+                setup::SetupAction::ListModelsOnly | setup::SetupAction::SetKey | setup::SetupAction::PrintVersion => {
+                    // Already handled by setup
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -567,6 +589,11 @@ enum CliAction {
         base_commit: Option<String>,
         reasoning_effort: Option<String>,
         allow_broad_cwd: bool,
+    },
+    Setup {
+        target: setup::SetupTarget,
+        model: Option<String>,
+        output_format: CliOutputFormat,
     },
     HelpTopic(LocalHelpTopic),
     // prompt-mode formatting is only supported for non-interactive runs
@@ -995,6 +1022,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "system-prompt" => parse_system_prompt_args(&rest[1..], output_format),
         "acp" => parse_acp_args(&rest[1..], output_format),
         "login" | "logout" => Err(removed_auth_surface_error(rest[0].as_str())),
+        "setup" => parse_setup_args(&rest[1..], output_format),
         "init" => Ok(CliAction::Init { output_format }),
         "export" => parse_export_args(&rest[1..], output_format),
         "prompt" => {
@@ -1197,6 +1225,72 @@ fn removed_auth_surface_error(command_name: &str) -> String {
     format!(
         "`claw {command_name}` has been removed. Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
     )
+}
+
+use setup::SetupTarget;
+
+fn parse_setup_args(args: &[String], output_format: CliOutputFormat) -> Result<CliAction, String> {
+    let (target, model) = match args.first().map(String::as_str) {
+        None | Some("help") => {
+            return Err(String::from(
+                concat!(
+                    "claw setup [ollama|lmstudio|openrouter|models] [model]
+", 
+                    "  Ollama:        claw setup ollama [model]
+", 
+                    "  LM Studio:     claw setup lmstudio [model]
+", 
+                    "  OpenRouter:    claw setup openrouter [--list-models] [--set-key <key>] [model]
+", 
+                    "  Unified:       claw setup models
+"
+                )
+            ));
+        }
+        Some("ollama") => {
+            let model = args.get(1).cloned();
+            (SetupTarget::Ollama, model)
+        }
+        Some("lmstudio") => {
+            let model = args.get(1).cloned();
+            (SetupTarget::LmStudio, model)
+        }
+        Some("openrouter") => {
+            let mut model_hint = None;
+            let mut list_models = false;
+            let mut set_key = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--list-models" => list_models = true,
+                    "--set-key" => {
+                        i += 1;
+                        set_key = args.get(i).cloned();
+                    }
+                    flag if flag.starts_with("--set-key=") => {
+                        set_key = Some(flag[10..].to_string());
+                    }
+                    other => model_hint = Some(other.to_string()),
+                }
+                i += 1;
+            }
+            (SetupTarget::OpenRouter { set_key, list_models }, model_hint)
+        }
+        Some("models") => {
+            if args.len() > 1 {
+                return Err("claw setup models does not accept additional arguments".to_string());
+            }
+            (SetupTarget::Models, None)
+        }
+        Some(other) => {
+            return Err(format!("unknown setup target: {other}. Use ollama, lmstudio, openrouter, or models."));
+        }
+    };
+    Ok(CliAction::Setup {
+        target,
+        model,
+        output_format,
+    })
 }
 
 fn parse_acp_args(args: &[String], output_format: CliOutputFormat) -> Result<CliAction, String> {
