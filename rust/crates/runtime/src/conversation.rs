@@ -190,12 +190,15 @@ impl ResilienceConfig {
         }
     }
 
-    /// Check if resilience is enabled
+    /// Check if resilience is enabled for any provider type
     pub fn is_enabled(&self) -> bool {
         if self.force_disable {
             return false;
         }
-        self.force_enable || true
+        if self.force_enable {
+            return true;
+        }
+        self.enable_for_anthropic || self.enable_for_openai_compat || self.auto_enable_for_local
     }
 
     /// Enable resilience for Anthropic API
@@ -769,21 +772,38 @@ where
             };
             // Resilience-aware retry loop: classify errors, apply per-error-type
             // retry budgets and backoff, and trigger recovery strategies.
-            let events = match self.stream_with_resilience(request) {
-                Ok(events) => events,
-                Err(error) => {
-                    self.record_turn_failed(iterations, &error);
-                    return Err(error);
-                }
-            };
-            let (assistant_message, usage, turn_prompt_cache_events) =
-                match build_assistant_message(events) {
-                    Ok(result) => result,
+            let mut build_attempt = 0;
+            let (assistant_message, usage, turn_prompt_cache_events) = loop {
+                build_attempt += 1;
+                let events = match self.stream_with_resilience(request.clone()) {
+                    Ok(events) => events,
                     Err(error) => {
                         self.record_turn_failed(iterations, &error);
                         return Err(error);
                     }
                 };
+                match build_assistant_message(events) {
+                    Ok(result) => break result,
+                    Err(error) => {
+                        let error_class = ErrorClass::classify(&error);
+                        let max_retries = self.resilience_config.max_retries_for(error_class.as_str());
+                        if build_attempt > max_retries {
+                            self.record_turn_failed(iterations, &error);
+                            return Err(error);
+                        }
+                        eprintln!(
+                            "build_assistant_message failed on attempt {}, max_retries={}: {}",
+                            build_attempt, max_retries, error
+                        );
+                        let backoff = self
+                            .resilience_config
+                            .backoff_for_attempt(error_class.as_str(), build_attempt);
+                        if backoff > Duration::from_secs(0) {
+                            std::thread::sleep(backoff);
+                        }
+                    }
+                }
+            };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }

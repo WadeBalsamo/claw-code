@@ -8036,11 +8036,13 @@ impl ApiClient for AnthropicRuntimeClient {
                 match result {
                     Ok(events) => return Ok(events),
                     Err(error)
-                        if error.to_string().contains("post-tool stall")
+                        if is_post_tool
+                            && error.to_string().contains("post-tool stall")
                             && attempt < max_attempts =>
                     {
                         // Stalled after tool completion — nudge the model by
                         // re-sending the same request.
+                        continue;
                     }
                     Err(error) => return Err(error),
                 }
