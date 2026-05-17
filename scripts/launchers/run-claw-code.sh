@@ -56,12 +56,44 @@ REMOTE=0
 RESOURCE=""
 TIMEOUT=1800
 MAX_PARALLEL=1
+PR_INTO=""
+SPRINT_ID=""
+BRANCH_OVERRIDE=""
+
+list_visible_presets() {
+  # Enumerate presets in both search paths, hiding any whose
+  # requires_feature_flag env var is unset/0/false.
+  python3 - <<PY
+import json, os, glob
+seen = set()
+paths = [os.path.expanduser("~/.lmcode/presets"), "${REPO_ROOT}/scripts/presets"]
+for d in paths:
+    for f in sorted(glob.glob(os.path.join(d, "*.json"))):
+        name = os.path.splitext(os.path.basename(f))[0]
+        if name in seen:
+            continue
+        try:
+            p = json.load(open(f))
+        except Exception:
+            continue
+        flag = p.get("requires_feature_flag")
+        if flag:
+            v = os.environ.get(flag, "")
+            if v.lower() not in ("1", "true", "yes", "on"):
+                continue
+        seen.add(name)
+        desc = p.get("description", "")
+        rt = p.get("resource_type") or p.get("resource") or ""
+        print(f"  {name:<32} [{rt:<14}] {desc[:80]}")
+PY
+}
 
 show_help() {
   cat <<EOF
 Usage: run-claw-code --agent <preset> --dir <path> --plan <prompt>
        [--id <uuid>] [--remote] [--resource <name>] [--timeout <sec>]
-       [--max-parallel <N>] [--help]
+       [--max-parallel <N>] [--pr-into <base_branch>] [--sprint-id <id>]
+       [--branch <name>] [--help]
 
 Output (4 lines):
   task_id=<uuid>
@@ -69,16 +101,30 @@ Output (4 lines):
   /tmp/claw-runs/<uuid>/diff.patch
   /tmp/claw-runs/<uuid>/summary.md
 
+When --pr-into is set, a 5th file is written:
+  /tmp/claw-runs/<uuid>/pr_request.json   (consumed by the EM's MCP layer)
+
+Available presets (gated presets hidden when their feature flag is off):
+EOF
+  list_visible_presets
+  cat <<EOF
+
 Preset JSON schema fields:
-  provider       - openrouter|lmstudio|ollama|anthropic|openai|auto
-  model          - model string passed via --model
-  env            - object of env var name:value pairs to set
-  plan_mode      - normal or ultraplan
-  system_prompt  - prepended to the plan text
-  temperature    - model temperature (0.0-1.0)
-  max_context    - context window limit
-  permission_mode - danger-full-access|read-only|default
-  allowed_tools  - list of tool names to restrict to
+  provider              - openrouter|lmstudio|ollama|anthropic|openai|auto
+  model                 - model string passed via --model
+  lmstudio_model_id     - exact ID for scheduler LMStudio swap
+  resource_type         - gpu-exclusive|gpu-em|gpu-overflow|cpu-bg|remote
+  env                   - object of env var name:value pairs to set
+  plan_mode             - normal or ultraplan
+  system_prompt         - prepended to the plan text
+  temperature           - model temperature (0.0-1.0)
+  max_context           - context window limit
+  permission_mode       - danger-full-access|read-only|default
+  allowed_tools         - list of tool names to restrict to
+  requires_feature_flag - env var that must be truthy to expose this preset
+  max_cost_usd          - per-invocation cost cap (remote presets)
+  cfo_budget_endpoint   - URL for live budget MCP check
+  completion_webhook    - URL to POST on task exit (wake-on-completion)
 EOF
   exit 0
 }
@@ -93,6 +139,9 @@ while [ $# -gt 0 ]; do
     --resource) RESOURCE="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
+    --pr-into) PR_INTO="$2"; shift 2 ;;
+    --sprint-id) SPRINT_ID="$2"; shift 2 ;;
+    --branch) BRANCH_OVERRIDE="$2"; shift 2 ;;
     --help|-h) show_help ;;
     *) echo "Unknown: $1" >&2; echo "Usage: run-claw-code --agent <preset> --dir <path> --plan <prompt>" >&2; exit 1 ;;
   esac
@@ -148,6 +197,60 @@ for k, v in d.get('env', {}).items():
     os.environ.setdefault(k, v)
 print('env applied')
 " 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Extended preset fields (workflow wiring)
+# ---------------------------------------------------------------------------
+RESOURCE_TYPE=$(python3 -c "import json; d=json.loads('$PRESET_JSON'); print(d.get('resource_type','') or '')" 2>/dev/null || echo "")
+LMSTUDIO_MODEL_ID=$(python3 -c "import json; d=json.loads('$PRESET_JSON'); print(d.get('lmstudio_model_id','') or '')" 2>/dev/null || echo "")
+REQUIRES_FLAG=$(python3 -c "import json; d=json.loads('$PRESET_JSON'); print(d.get('requires_feature_flag','') or '')" 2>/dev/null || echo "")
+MAX_COST_USD=$(python3 -c "import json; d=json.loads('$PRESET_JSON'); print(d.get('max_cost_usd','') or '')" 2>/dev/null || echo "")
+CFO_BUDGET_ENDPOINT=$(python3 -c "import json; d=json.loads('$PRESET_JSON'); print(d.get('cfo_budget_endpoint','') or '')" 2>/dev/null || echo "")
+COMPLETION_WEBHOOK=$(python3 -c "import json; d=json.loads('$PRESET_JSON'); print(d.get('completion_webhook','') or '')" 2>/dev/null || echo "")
+
+# If preset declares a resource_type and caller didn't pass --resource, use it.
+if [ -z "$RESOURCE" ] && [ -n "$RESOURCE_TYPE" ]; then
+  RESOURCE="$RESOURCE_TYPE"
+fi
+
+# Feature-flag gate: refuse to dispatch if required env var is not truthy.
+if [ -n "$REQUIRES_FLAG" ]; then
+  FLAG_VAL="$(printenv "$REQUIRES_FLAG" 2>/dev/null || echo "")"
+  case "$(echo "$FLAG_VAL" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) ;;
+    *)
+      echo "Preset '$AGENT' requires feature flag $REQUIRES_FLAG=1 (currently '${FLAG_VAL}')" >&2
+      mkdir -p "$RUN_ROOT/${TASK_ID:-_pre}" 2>/dev/null || true
+      exit 78  # EX_CONFIG
+      ;;
+  esac
+fi
+
+# CFO budget pre-flight gate (remote presets only).
+# Posts {preset, max_cost_usd, est_cost_usd:null, agent, sprint_id} to the
+# CFO MCP endpoint; expects {"allow": bool, "reason": "..."}.
+if [ -n "$CFO_BUDGET_ENDPOINT" ] && [ -n "$MAX_COST_USD" ]; then
+  BUDGET_RESPONSE=$(python3 - "$CFO_BUDGET_ENDPOINT" "$AGENT" "$MAX_COST_USD" "${SPRINT_ID:-}" <<'PY' 2>/dev/null || echo '{"allow": true, "reason": "endpoint-unreachable-fail-open"}'
+import json, sys, urllib.request
+url, agent, max_cost, sprint_id = sys.argv[1:]
+body = json.dumps({"preset": agent, "max_cost_usd": float(max_cost),
+                   "sprint_id": sprint_id or None}).encode()
+req = urllib.request.Request(url, data=body, method="POST",
+                             headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=5) as r:
+        print(r.read().decode())
+except Exception as e:
+    print(json.dumps({"allow": False, "reason": f"endpoint-error: {e.__class__.__name__}"}))
+PY
+)
+  ALLOW=$(echo "$BUDGET_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('allow', False))" 2>/dev/null || echo "False")
+  if [ "$ALLOW" != "True" ]; then
+    REASON=$(echo "$BUDGET_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason', 'denied'))" 2>/dev/null || echo "denied")
+    echo "CFO budget gate denied preset '$AGENT': $REASON" >&2
+    exit 77  # EX_NOPERM
+  fi
+fi
 
 # Set resilience based on provider
 case "$PROVIDER" in
@@ -433,6 +536,100 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Per-task PR request artifact (EM opens the PR — workers have no GH creds)
+# ---------------------------------------------------------------------------
+PR_REQUEST_FILE=""
+if [ -n "$PR_INTO" ] && [ "$EXIT_CODE" -eq 0 ] && [ "${FILES_CHANGED:-0}" != "0" ]; then
+  WORKER_BRANCH="${BRANCH_OVERRIDE:-claw-run/$TASK_ID}"
+  TITLE_LINE=$(head -1 "$SUMMARY_FILE" 2>/dev/null | head -c 100)
+  TITLE_LINE="${TITLE_LINE:-${AGENT}: task $TASK_ID}"
+  PR_REQUEST_FILE="$TASK_DIR/pr_request.json"
+
+  # Commit + push the worktree branch (best-effort; non-fatal on push failure
+  # so the EM can retry / push manually).
+  if [ -d "$GIT_DIR_PARENT/.git" ] || git -C "$GIT_DIR_PARENT" rev-parse --git-dir >/dev/null 2>&1; then
+    BASE_COMMIT=$(git -C "$GIT_DIR_PARENT" rev-parse HEAD 2>/dev/null || echo "")
+    git -C "$GIT_DIR_PARENT" checkout -B "$WORKER_BRANCH" >/dev/null 2>&1 || true
+    git -C "$GIT_DIR_PARENT" add -A >/dev/null 2>&1 || true
+    git -C "$GIT_DIR_PARENT" -c user.email="worker@claw-code.local" \
+        -c user.name="claw-code worker" \
+        commit -m "${AGENT}: ${TITLE_LINE}
+
+Task: ${TASK_ID}
+Sprint: ${SPRINT_ID:-unassigned}
+Preset: ${AGENT}" >/dev/null 2>&1 || true
+    PUSH_OK=1
+    git -C "$GIT_DIR_PARENT" push -u origin "$WORKER_BRANCH" >/dev/null 2>&1 || PUSH_OK=0
+  fi
+
+  python3 - "$PR_REQUEST_FILE" "$TASK_ID" "${SPRINT_ID:-}" "$WORKER_BRANCH" "$PR_INTO" "$TITLE_LINE" "$SUMMARY_FILE" "$AGENT" "$FILES_CHANGED" "$LINES_ADDED" "$LINES_REMOVED" <<'PY'
+import json, sys
+path, task_id, sprint_id, head, base, title, body_path, preset, files, added, removed = sys.argv[1:]
+out = {
+    "task_id": task_id,
+    "sprint_id": sprint_id or None,
+    "head": head,
+    "base": base,
+    "title": title.strip() or f"{preset}: task {task_id}",
+    "body_path": body_path,
+    "preset": preset,
+    "diff_stats": {
+        "files": int(files or 0),
+        "added": int(added or 0),
+        "removed": int(removed or 0),
+    },
+}
+json.dump(out, open(path, "w"), indent=2)
+PY
+
+  # Append to sprint manifest (atomic via flock)
+  if [ -n "$SPRINT_ID" ]; then
+    SPRINT_MANIFEST="$RUN_ROOT/_sprints/${SPRINT_ID}.json"
+    mkdir -p "$(dirname "$SPRINT_MANIFEST")"
+    (
+      flock 201
+      python3 - "$SPRINT_MANIFEST" "$TASK_ID" "$PR_INTO" "$AGENT" <<'PY'
+import json, os, sys
+path, task_id, base, preset = sys.argv[1:]
+if os.path.exists(path):
+    m = json.load(open(path))
+else:
+    m = {"sprint_id": os.path.basename(path).removesuffix(".json"),
+         "sprint_branch": base, "tasks": []}
+m.setdefault("tasks", []).append({
+    "task_id": task_id, "preset": preset, "status": "pr_requested",
+})
+json.dump(m, open(path, "w"), indent=2)
+PY
+    ) 201>"$RUN_ROOT/_sprints/${SPRINT_ID}.lock"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Completion webhook (wake-on-completion for the EM)
+# ---------------------------------------------------------------------------
+if [ -n "$COMPLETION_WEBHOOK" ]; then
+  python3 - "$COMPLETION_WEBHOOK" "$TASK_ID" "$AGENT" "${SPRINT_ID:-}" \
+    "$EXIT_CODE" "$TASK_DIR/status.json" "$DIFF_FILE" "$SUMMARY_FILE" \
+    "${PR_REQUEST_FILE:-}" <<'PY' >/dev/null 2>&1 || true
+import json, sys, urllib.request
+url, task_id, agent, sprint_id, exit_code, status, diff, summary, pr_req = sys.argv[1:]
+payload = json.dumps({
+    "task_id": task_id, "agent": agent, "sprint_id": sprint_id or None,
+    "exit_code": int(exit_code), "status_file": status,
+    "diff_file": diff, "summary_file": summary,
+    "pr_request_file": pr_req or None,
+}).encode()
+req = urllib.request.Request(url, data=payload, method="POST",
+                             headers={"Content-Type": "application/json"})
+try:
+    urllib.request.urlopen(req, timeout=5)
+except Exception:
+    pass
+PY
+fi
+
+# ---------------------------------------------------------------------------
 # Release resource lock
 # ---------------------------------------------------------------------------
 if [ -n "$RESOURCE" ] && [ "$ACQUIRED" = "1" ]; then
@@ -452,9 +649,12 @@ except:
 fi
 
 # ---------------------------------------------------------------------------
-# Output contract (4 lines)
+# Output contract (4 lines, +1 optional pr_request line)
 # ---------------------------------------------------------------------------
 echo "task_id=$TASK_ID"
 echo "$TASK_DIR/status.json"
 echo "$DIFF_FILE"
 echo "$SUMMARY_FILE"
+if [ -n "${PR_REQUEST_FILE:-}" ] && [ -f "$PR_REQUEST_FILE" ]; then
+  echo "pr_request=$PR_REQUEST_FILE"
+fi
