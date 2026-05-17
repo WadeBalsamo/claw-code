@@ -56,6 +56,15 @@ DEFAULT_MAX_PARALLEL = 1
 DEFAULT_POLL_INTERVAL = 5  # seconds
 DEFAULT_QUEUE_MAX_AGE = 86400  # 24 hours; expire stale queue entries
 
+# resource_limits.json lives next to this file in scripts/
+RESOURCE_LIMITS_PATH = Path(__file__).resolve().parent / "resource_limits.json"
+
+# LMStudio swap config — see meta/LMSTUDIO_MODEL_SWAP.md in SCAI-root
+LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234")
+LMSTUDIO_UNLOAD_TIMEOUT_S = 10
+LMSTUDIO_LOAD_TIMEOUT_S = 60
+LMSTUDIO_SETTLE_S = 2
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -129,12 +138,137 @@ class Scheduler:
         self._running = False
         self._stop_event = threading.Event()
 
+        # Mutex groups & concurrent rules (see resource_limits.json)
+        # _mutex_groups: { resource_name -> group_name } — at most one member held across the group
+        # _concurrent_forbids: { resource_name -> [other_resource_names that must NOT be held] }
+        # _lmstudio_model_for: { resource_name -> lmstudio_model_id }  (registered by schedule callers)
+        self._mutex_groups: Dict[str, str] = {}
+        self._concurrent_forbids: Dict[str, List[str]] = {}
+        self._lmstudio_model_for: Dict[str, str] = {}
+        self._currently_loaded_gpu_model: Optional[str] = None
+
+        self._load_resource_limits()
         # Load persistent state
         self._load_state()
 
     # -----------------------------------------------------------------------
+    # resource_limits.json — capacities, mutex groups, concurrent rules
+    # -----------------------------------------------------------------------
+    def _load_resource_limits(self):
+        if not RESOURCE_LIMITS_PATH.exists():
+            logger.warning("resource_limits.json not found at %s — running with defaults",
+                           RESOURCE_LIMITS_PATH)
+            return
+        try:
+            cfg = json.loads(RESOURCE_LIMITS_PATH.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Failed to parse resource_limits.json: %s", e)
+            return
+
+        for name, spec in (cfg.get("resources") or {}).items():
+            cap = int(spec.get("capacity", 1))
+            self.register_resource(name, max_parallel=cap)
+
+        for group_name, group in (cfg.get("mutex_groups") or {}).items():
+            for member in group.get("members", []):
+                self._mutex_groups[member] = group_name
+
+        for name, rule in (cfg.get("concurrent_rules") or {}).items():
+            self._concurrent_forbids[name] = list(rule.get("forbids_concurrent", []))
+
+        logger.info("Loaded resource_limits.json: %d resources, %d mutex groups, %d concurrent rules",
+                    len(cfg.get("resources") or {}),
+                    len(cfg.get("mutex_groups") or {}),
+                    len(self._concurrent_forbids))
+
+    # -----------------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------------
+
+    def _mutex_group_blocked(self, resource: str) -> bool:
+        """True if `resource` is in a mutex group and a sibling member already holds a slot."""
+        group = self._mutex_groups.get(resource)
+        if not group:
+            return False
+        siblings = [r for r, g in self._mutex_groups.items() if g == group and r != resource]
+        for s in siblings:
+            res = self._resources.get(s)
+            if res and len(res.slots) > 0:
+                return True
+        return False
+
+    def _concurrent_forbidden(self, resource: str) -> Optional[str]:
+        """If `resource`'s concurrent-forbid rule conflicts, return the offending held resource name."""
+        forbids = self._concurrent_forbids.get(resource, [])
+        for other in forbids:
+            res = self._resources.get(other)
+            if res and len(res.slots) > 0:
+                return other
+        # Also check the inverse: if a currently-held resource forbids OUR resource
+        for held_name, res in self._resources.items():
+            if len(res.slots) == 0:
+                continue
+            if resource in self._concurrent_forbids.get(held_name, []):
+                return held_name
+        return None
+
+    def register_lmstudio_model(self, resource: str, lmstudio_model_id: str):
+        """Caller (run-claw-code) tells us which LMStudio model this resource needs."""
+        if lmstudio_model_id:
+            self._lmstudio_model_for[resource] = lmstudio_model_id
+
+    def safe_swap(self, target_model_id: str) -> None:
+        """
+        Perform the unload-poll-load LMStudio swap. See meta/LMSTUDIO_MODEL_SWAP.md.
+        Caller must hold the GPU mutex group claim before invoking.
+        Raises RuntimeError on swap failure.
+        """
+        try:
+            import urllib.request, urllib.error
+        except ImportError:
+            raise RuntimeError("urllib not available for LMStudio swap")
+
+        def _list_models():
+            try:
+                with urllib.request.urlopen(f"{LMSTUDIO_BASE_URL}/v1/models", timeout=5) as r:
+                    data = json.loads(r.read())
+                    return [m.get("id") for m in (data.get("data") or [])]
+            except Exception:
+                return []
+
+        loaded = self._currently_loaded_gpu_model
+        if loaded == target_model_id:
+            return
+
+        if loaded:
+            try:
+                req = urllib.request.Request(
+                    f"{LMSTUDIO_BASE_URL}/v1/models/{loaded}/unload", method="POST")
+                urllib.request.urlopen(req, timeout=LMSTUDIO_UNLOAD_TIMEOUT_S)
+            except Exception as e:
+                logger.warning("LMStudio unload of %s failed: %s — continuing to poll", loaded, e)
+            deadline = time.time() + LMSTUDIO_UNLOAD_TIMEOUT_S
+            while time.time() < deadline:
+                if loaded not in _list_models():
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError(f"unload of {loaded} did not confirm in {LMSTUDIO_UNLOAD_TIMEOUT_S}s")
+            time.sleep(LMSTUDIO_SETTLE_S)
+
+        try:
+            req = urllib.request.Request(
+                f"{LMSTUDIO_BASE_URL}/v1/models/{target_model_id}/load", method="POST")
+            urllib.request.urlopen(req, timeout=LMSTUDIO_LOAD_TIMEOUT_S)
+        except Exception as e:
+            raise RuntimeError(f"LMStudio load of {target_model_id} failed: {e}")
+        deadline = time.time() + LMSTUDIO_LOAD_TIMEOUT_S
+        while time.time() < deadline:
+            if target_model_id in _list_models():
+                self._currently_loaded_gpu_model = target_model_id
+                return
+            time.sleep(0.5)
+        raise RuntimeError(f"load of {target_model_id} did not confirm in {LMSTUDIO_LOAD_TIMEOUT_S}s")
 
     def schedule(
         self,
@@ -146,13 +280,20 @@ class Scheduler:
         remote: bool = False,
         timeout: int = 1800,
         max_parallel: int = DEFAULT_MAX_PARALLEL,
+        lmstudio_model_id: str = "",
     ) -> str:
         """
         Schedule a task for a named resource.
 
-        Returns immediately with status 'claimed' if a slot is available,
-        or 'queued' if all slots are full. The caller should poll
+        Returns immediately with status 'claimed' if a slot is available
+        AND no mutex/concurrent constraint is violated, or 'queued' if all
+        slots are full or a constraint blocks. The caller should poll
         claim_status(task_id) to detect when the task gets promoted.
+
+        If lmstudio_model_id is given and `resource` is in the GPU mutex
+        group, the scheduler performs the safe LMStudio swap before granting
+        the slot. Swap failures cause the task to remain queued and the
+        scheduler logs the error.
         """
         with self._lock:
             if resource not in self._resources:
@@ -160,6 +301,9 @@ class Scheduler:
                     name=resource,
                     max_parallel=max_parallel,
                 )
+
+            if lmstudio_model_id:
+                self._lmstudio_model_for[resource] = lmstudio_model_id
 
             res = self._resources[resource]
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -176,7 +320,29 @@ class Scheduler:
                 queued_at=now,
             )
 
-            if res.available_slots > 0:
+            constraint_block = (
+                self._mutex_group_blocked(resource)
+                or self._concurrent_forbidden(resource) is not None
+            )
+
+            if res.available_slots > 0 and not constraint_block:
+                # GPU group → perform safe LMStudio swap before claiming.
+                if resource in self._mutex_groups:
+                    target = self._lmstudio_model_for.get(resource) or lmstudio_model_id
+                    if target:
+                        try:
+                            self.safe_swap(target)
+                        except RuntimeError as e:
+                            logger.error("safe_swap failed for %s -> %s: %s",
+                                         resource, target, e)
+                            # Queue the request instead of claiming
+                            res.queue.append(request)
+                            request.status = "queued"
+                            self._write_queue_entry(resource, request)
+                            self._save_state()
+                            self._write_ledger()
+                            return request.status
+
                 # Claim immediately
                 slot = ResourceSlot(
                     slot_id=self._next_slot_id(res),
