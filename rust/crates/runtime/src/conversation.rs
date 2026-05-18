@@ -491,6 +491,9 @@ impl std::error::Error for ToolError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
     message: String,
+    /// Set when the API layer already exhausted its own retry budget so the
+    /// resilience layer knows not to retry the same request again.
+    pub retries_exhausted: bool,
 }
 
 impl RuntimeError {
@@ -498,6 +501,17 @@ impl RuntimeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            retries_exhausted: false,
+        }
+    }
+
+    /// Construct an error that signals retries have already been exhausted by a
+    /// lower layer. `stream_with_resilience` will not retry these.
+    #[must_use]
+    pub fn exhausted(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retries_exhausted: true,
         }
     }
 }
@@ -1192,6 +1206,13 @@ where
                     return Ok(events);
                 }
                 Err(error) => {
+                    // The API layer already exhausted its own retry budget.
+                    // Retrying here would multiply duplicate requests to the
+                    // server (e.g. 3 outer × 3 inner = 9 sends for one prompt).
+                    if error.retries_exhausted {
+                        return Err(error);
+                    }
+
                     let error_class = ErrorClass::classify(&error);
                     let max_retries = self.resilience_config.max_retries_for(error_class.as_str());
 
@@ -1263,12 +1284,23 @@ where
                         }
                     }
 
-                    // Apply backoff before retrying
+                    // Apply backoff before retrying. For timeout and
+                    // empty-stream errors enforce a minimum 2 s teardown grace
+                    // period: local model servers (e.g. LM Studio) may not
+                    // abort an in-flight request immediately on client
+                    // disconnect, so we wait before sending a duplicate.
                     let backoff = self
                         .resilience_config
                         .backoff_for_attempt(error_class.as_str(), attempt);
-                    if backoff > Duration::from_secs(0) {
-                        std::thread::sleep(backoff);
+                    let teardown_grace = match error_class {
+                        ErrorClass::FirstTokenTimeout | ErrorClass::EmptyStream => {
+                            Duration::from_secs(2)
+                        }
+                        _ => Duration::ZERO,
+                    };
+                    let total_sleep = backoff.max(teardown_grace);
+                    if total_sleep > Duration::ZERO {
+                        std::thread::sleep(total_sleep);
                     }
                 }
             }
@@ -2398,5 +2430,96 @@ mod tests {
 
         // then
         assert_eq!(error.to_string(), "upstream failed");
+    }
+
+    #[test]
+    fn stream_with_resilience_does_not_retry_exhausted_errors() {
+        use std::sync::{Arc, Mutex};
+
+        // An API client that counts calls and always returns an exhausted error.
+        struct ExhaustedApi {
+            call_count: Arc<Mutex<usize>>,
+        }
+        impl ApiClient for ExhaustedApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                *self.call_count.lock().unwrap() += 1;
+                Err(RuntimeError::exhausted(
+                    "model unloaded after retries exhausted",
+                ))
+            }
+        }
+
+        let call_count = Arc::new(Mutex::new(0usize));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            ExhaustedApi {
+                call_count: call_count.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let _ = runtime.run_turn("hello", None);
+
+        // stream_with_resilience must not re-try an already-exhausted error —
+        // exactly one API call should have been made.
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            1,
+            "exhausted errors must not be retried"
+        );
+    }
+
+    #[test]
+    fn stream_with_resilience_retries_normal_retryable_errors() {
+        use std::sync::{Arc, Mutex};
+
+        // An API client that fails twice then succeeds.
+        struct RetryableApi {
+            call_count: Arc<Mutex<usize>>,
+        }
+        impl ApiClient for RetryableApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                let mut count = self.call_count.lock().unwrap();
+                *count += 1;
+                if *count < 3 {
+                    Err(RuntimeError::new("model unloaded"))
+                } else {
+                    Ok(vec![
+                        AssistantEvent::TextDelta("ok".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+            }
+        }
+
+        let call_count = Arc::new(Mutex::new(0usize));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            RetryableApi {
+                call_count: call_count.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        runtime
+            .run_turn("hello", None)
+            .expect("should succeed after retries");
+
+        // Should have retried twice before succeeding on the third call.
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            3,
+            "normal retryable errors should retry"
+        );
     }
 }

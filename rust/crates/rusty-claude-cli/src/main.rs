@@ -8082,7 +8082,14 @@ impl AnthropicRuntimeClient {
             .stream_message(message_request)
             .await
             .map_err(|error| {
-                RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+                let msg = format_user_visible_api_error(&self.session_id, &error);
+                // Preserve the exhausted flag so stream_with_resilience does
+                // not re-send a prompt that was already retried at the HTTP layer.
+                if matches!(error, api::ApiError::RetriesExhausted { .. }) {
+                    RuntimeError::exhausted(msg)
+                } else {
+                    RuntimeError::new(msg)
+                }
             })?;
         let mut stdout = io::stdout();
         let mut sink = io::sink();
