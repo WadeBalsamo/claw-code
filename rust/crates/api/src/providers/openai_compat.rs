@@ -328,7 +328,12 @@ impl OpenAiCompatClient {
                                 &request.model,
                                 state_machine.context().health_profile.clone(),
                             );
-                            return Err(err);
+                            // Wrap in RetriesExhausted so the outer resilience
+                            // layer knows not to retry this prompt again.
+                            return Err(ApiError::RetriesExhausted {
+                                attempts: state_machine.context().attempt,
+                                last_error: Box::new(err),
+                            });
                         }
                     }
                 }
@@ -372,7 +377,12 @@ impl OpenAiCompatClient {
                         &request.model,
                         state_machine.context().health_profile.clone(),
                     );
-                    return Err(err);
+                    // Wrap in RetriesExhausted so the outer resilience layer
+                    // knows not to retry this prompt again.
+                    return Err(ApiError::RetriesExhausted {
+                        attempts: state_machine.context().attempt,
+                        last_error: Box::new(err),
+                    });
                 }
             }
         }

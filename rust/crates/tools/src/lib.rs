@@ -4611,7 +4611,14 @@ impl ApiClient for ProviderRuntimeClient {
                     );
                     last_error = Some(error);
                 }
-                Err(error) => return Err(RuntimeError::new(error.to_string())),
+                Err(error) => {
+                    // Preserve the exhausted flag so stream_with_resilience
+                    // does not re-send a prompt that was already retried.
+                    if matches!(error, ApiError::RetriesExhausted { .. }) {
+                        return Err(RuntimeError::exhausted(error.to_string()));
+                    }
+                    return Err(RuntimeError::new(error.to_string()));
+                }
             }
         }
 
